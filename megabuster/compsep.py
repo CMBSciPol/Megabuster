@@ -37,13 +37,14 @@ class Results(object):
     W_maxL: Callable # W function at the parameters fitted
     A_maxL: ArrayLike # Mixing matrix operator at the parameters fitted
     success: bool # success of the optimization
-    
+    message: str
     def __init__(self):
         self.x = None
         self.s = None
         self.W_maxL = None
         self.A_maxL = None
         self.success = False
+        self.message = "No optimization performed yet."
 
     @classmethod
     def from_compsep_results(
@@ -91,6 +92,7 @@ class Results(object):
         res.A_maxL = final_A_maxL
         res.s = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
         res.success = number_iterations < max_iter
+        res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
         return res
 
 def dot_2(x,y):

@@ -1,6 +1,7 @@
 import numpy as np
 import scipy
 from scipy.sparse import csr_matrix
+from tqdm import tqdm
 
 def get_data_ind_j(matrix: scipy.sparse.sparray, path_save):
     """ Retrieve the data and indices of the non-zero elements of a sparse matrix
@@ -33,11 +34,9 @@ def get_data_ind_j(matrix: scipy.sparse.sparray, path_save):
     first_indices_i = np.append(first_indices_i, ind_j.size + 1)
     first_indices_j = np.append(first_indices_j, ind_i.size + 1)
     print("## Entering loop", flush=True)
-    # for j in range(2*n_pix):
+
     for j in tqdm(range(n_data)): # Loop on the indices in the mask
 
-        #if j % 2000 == 0:
-        #    print(f"------ Looping {j}/{n_data}", flush=True)
         new_ind_i[j,:counts_i[j]] = ind_j[first_indices_i[j]:first_indices_i[j+1]]
         new_data_i[j,:counts_i[j]] = data[first_indices_i[j]:first_indices_i[j+1]]
         
@@ -56,3 +55,36 @@ def get_data_ind_j(matrix: scipy.sparse.sparray, path_save):
 
     print(f"## Saving to {path_save}", flush=True)
     np.savez(path_save, new_data_i=new_data_i, new_ind_i=new_ind_i, new_data_j=new_data_j, new_ind_j=new_ind_j, values_i=values_i, values_j=values_j, counts_i=counts_i, counts_j=counts_j)
+
+def compute_threshold_matrices(list_threshold, list_sparse_matrix, list_path_save, nstokes=2):
+    """ Compute the threshold matrices for a list of matrices and save them to a file.
+    
+    Parameters
+    ----------
+    list_threshold : list of float
+        The list of thresholds to apply to the matrices so that every element is below the corresponding threshold in absolute value
+    list_sparse_matrix : list of scipy.sparse.sparray
+        The list of sparse matrices to apply the thresholds to.
+    path_save : str
+        The path to save the resulting matrices.
+    """
+    
+    assert len(list_threshold) == len(list_sparse_matrix), "The list of thresholds and the list of matrices must have the same length."
+
+    n_freq = len(list_sparse_matrix)
+    
+    npix = list_sparse_matrix[0].shape[0] // nstokes
+
+    for i in tqdm(n_freq):
+        
+        big_matrix = list_sparse_matrix[i].copy()
+
+        cond = np.abs(big_matrix.data) < list_threshold[i]
+        big_matrix.data[cond] = 0
+
+        label_stokes = ['q', 'u'] if nstokes == 2 else ['i', 'q', 'u']
+
+        for j in range(nstokes):
+            for k in range(nstokes):
+                get_data_ind_j(big_matrix[j*npix:(j+1)*npix, k*npix:(k+1)*npix], f"{list_path_save[i]}_threshold_{i}_stokes_{label_stokes[j]}_{label_stokes[k]}.npz")
+    
