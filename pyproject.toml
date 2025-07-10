@@ -1,0 +1,68 @@
+[build-system]
+build-backend = 'setuptools.build_meta'
+requires = [
+    'setuptools==64.0.3',
+    'setuptools_scm[toml]>=6.2',
+    'wheel',
+]
+
+[project]
+name = 'megabuster'
+authors = [
+]
+maintainers = [
+]
+description = 'MEGATOP jax compsep'
+#readme = 'README.md'
+keywords = [
+    'scientific computing',
+]
+classifiers = [
+    'Programming Language :: Python',
+    'Programming Language :: Python :: 3',
+    'Intended Audience :: Science/Research',
+    'Operating System :: OS Independent',
+    'Topic :: Scientific/Engineering',
+]
+requires-python = '>=3.7'
+license = {file = 'LICENSE'}
+dependencies = [
+    'healpy>=0.16.6',
+    'jax_grid_search',
+    'numpy',
+    'scipy',
+    'furax',
+    'jax',
+    'equinox',
+    'optax',
+    'lineax',
+    'jaxtyping',
+    'opt_einsum'
+]
+dynamic = ['version']
+
+[project.optional-dependencies]
+full = [
+    'fgbuster @ git+https://github.com/fgbuster/fgbuster.git@std_inst_bandpass',
+    'toml',
+]
+
+
+[project.urls]
+# homepage = ''
+# repository = ''
+
+[[tool.mypy.overrides]]
+module = [
+    'megabuster',
+]
+ignore_missing_imports = true
+
+[tool.setuptools]
+packages = ["megabuster"]
+
+[tool.setuptools_scm]
+# version_scheme = 'release'
+# fallback_version = '0.0.0'
+# local_scheme = "no-local-version"
+# write_to = "micmac/_version.py"
