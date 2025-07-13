@@ -54,3 +54,4 @@ def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, nstokes=None, kind='pr
         operator_output = to_QU_operators_from_files(list_precomputations, int(size_obsmat))
         if return_transpose:
             return operator_output.T
+        return operator_output
