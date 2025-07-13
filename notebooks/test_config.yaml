@@ -1,0 +1,129 @@
+cl2r_pars:
+  dust_marg: false
+  sync_marg: false
+data_dirs:
+  beams: beams
+  maps: maps
+  noise_maps: noise_maps
+  passbands: passbands
+  root: data_root
+fiducial_cmb:
+  lensed_scalar: lensed_scalar_cl
+  root: fiducial_cmb_root
+  unlensed_scalar_tensor_r1: unlensed_scalar_tensor_r1_cl
+general_pars:
+  lmax: 1000
+  lmin: 30
+  nside: 512
+map2cl_pars:
+  delta_ell: 10
+  n_iter_namaster: 3
+  purify_b: true
+  purify_e: false
+map_sets:
+- exp_tag: SAT4
+  file_prefix: ''
+  freq_tag: 27
+  noise_prefix: noise_
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT4_mission_f030_4way_coadd_sky_obsmat_healpix
+  passband_filename: ''
+- exp_tag: SAT4
+  file_prefix: ''
+  freq_tag: 39
+  noise_prefix: noise_
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT4_mission_f040_4way_coadd_sky_obsmat_healpix
+  passband_filename: ''
+- exp_tag: SAT1
+  file_prefix: ''
+  freq_tag: 93
+  noise_prefix: noise_
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT1_mission_f090_4way_coadd_sky_obsmat_healpix
+  passband_filename: ''
+- exp_tag: SAT1
+  file_prefix: ''
+  freq_tag: 145
+  noise_prefix: noise_
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT1_mission_f150_4way_coadd_sky_obsmat_healpix
+  passband_filename: ''
+- exp_tag: SAT3
+  file_prefix: ''
+  freq_tag: 225
+  noise_prefix: noise_
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT3_mission_f230_4way_coadd_sky_obsmat_healpix
+  passband_filename: ''
+- exp_tag: SAT3
+  file_prefix: ''
+  freq_tag: 280
+  noise_prefix: noise_
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT3_mission_f290_4way_coadd_sky_obsmat_healpix
+  passband_filename: ''
+map_sim_pars:
+  A_lens: 1
+  cmb_seed: null
+  cmb_sim_no_pysm: true
+  filter_sims: false
+  n_sim: 1
+  passband_int: false
+  r_input: 0
+  single_cmb: false
+  sky_model:
+  - d0
+  - s0
+masks_pars:
+  analysis_mask_name: analysis_mask
+  apod_radius: 10
+  apod_radius_point_source: 4
+  apod_type: C1
+  binary_mask_name: mask_B_ring
+  binary_mask_zero_threshold: 0.1
+  gal_key: null
+  galactic_mask_name: galactic_mask
+  include_galactic: false
+  include_sources: false
+  input_nhits_map: null
+  input_sources_mask: null
+  mock_nsources: 100
+  mock_sources_hole_radius: 4
+  nhits_map_name: nhits_map
+  sources_mask_name: sources_mask
+noise_cov_pars:
+  save_preprocessed_noise_maps: false
+noise_sim_pars:
+  SAC_yrs_LF: 1
+  experiment: SO
+  include_nhits: true
+  n_sim: 1
+  noise_option: noise_spectra
+  v3_one_over_f_mode: OPTIMISTIC
+  v3_sensitivity_mode: GOAL
+output_dirs:
+  components: components
+  covar: ''
+  masks: ''
+  mcmc: mcmc
+  noise_spectra: noise_spectra
+  plots: plots
+  prepoc_diag_obsmat: diag_obsmat # Modifications megabuster
+  preproc: ''
+  root: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP
+  spectra: spectra
+  suffix_cg_obsmat: __south_threshold_0.01 # Modifications megabuster
+  suffix_rhs_obsmat: __south # Modifications megabuster
+parametric_sep_pars:
+  include_synchrotron: true
+  minimize_method: 'personalized'
+  minimize_options:
+    disp: false
+    eps: 1.0e-12
+    ftol: 1.0e-12
+    gtol: 1.0e-12
+    maxiter: 20
+  minimize_tol: 1.0e-6
+  passband_int: false
+  return_transpose_rhs: true # Modifications megabuster
+plot_pars:
+  lmax_plot: 1000
+  lmin_plot: 30
+pre_proc_pars:
+  beam_fwhms: null
+  common_beam_correction: 100
