@@ -37,14 +37,14 @@ dependencies = [
     'optax',
     'lineax',
     'jaxtyping',
-    'opt_einsum'
+    'opt_einsum',
+    'tqdm'
 ]
 dynamic = ['version']
 
 [project.optional-dependencies]
 full = [
     'fgbuster @ git+https://github.com/fgbuster/fgbuster.git@std_inst_bandpass',
-    'toml',
 ]
 
 
