@@ -26,7 +26,7 @@ def load_obsmat_mask(path_obsmat, size_obsmat, mask_stacked=None):
     return sparse_matrix
 
 
-def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, nstokes=None, kind='precomputations_indices', mask_stacked=None):
+def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, nstokes=None, kind='precomputations_indices', mask_stacked=None, return_transpose=False):
     """
     Load all obsmat from a list of paths.
     """
@@ -35,7 +35,7 @@ def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, nstokes=None, kind='pr
 
     if kind == 'precomputations_scipy':
         return [load_obsmat_mask(
-            path_obsmat=path_obsmat,
+            path_obsmat=str(path_obsmat),
             size_obsmat=size_obsmat,
             mask_stacked=mask_stacked
         ) for path_obsmat in list_path_obsmat_prefix]
@@ -46,9 +46,11 @@ def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, nstokes=None, kind='pr
 
         list_precomputations = [
             [
-                [path_obsmat  + f"_stokes_{label_stokes[i]}_stokes_{label_stokes[j]}.npz" for i in range(nstokes)]
+                [str(path_obsmat)  + f"_stokes_{label_stokes[i]}_stokes_{label_stokes[j]}.npz" for i in range(nstokes)]
                 for j in range(nstokes)
             ]
             for path_obsmat in list_path_obsmat_prefix
         ]
-        return to_QU_operators_from_files(list_precomputations, int(size_obsmat))
+        operator_output = to_QU_operators_from_files(list_precomputations, int(size_obsmat))
+        if return_transpose:
+            return operator_output.T
