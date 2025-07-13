@@ -37,6 +37,7 @@ class Results(object):
         success (bool):
             Boolean indicating whether the optimization was successful.
     """
+    params: list[str] = ['temp_dust', 'beta_dust', 'beta_pl']
     x: ArrayLike # parameters fitted
     s: ArrayLike # sky map
     W_maxL: Callable # W function at the parameters fitted
@@ -44,6 +45,7 @@ class Results(object):
     success: bool # success of the optimization
     message: str
     def __init__(self):
+        self.params = None
         self.x = None
         self.s = None
         self.W_maxL = None
@@ -54,6 +56,7 @@ class Results(object):
     @classmethod
     def from_compsep_results(
         cls, 
+        name_params,
         final_params, 
         final_W_func, 
         final_A_maxL,
@@ -78,6 +81,7 @@ class Results(object):
             Results: An instance of Results containing the final parameters, W function, and success status.
         """
         res = cls()
+        res.params = name_params
         res.x = np.array([final_params[key] for key in ordering_parameter])
 
         def final_W(input_maps):
@@ -399,6 +403,7 @@ def perform_compsep(
         return output_map
 
     return Results.from_compsep_results(
+        list(output_params.keys()),
         output_params, 
         W_maxL, 
         A_maxL_array,
