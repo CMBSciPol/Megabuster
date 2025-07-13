@@ -4,6 +4,11 @@ from jaxtyping import ArrayLike
 from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator
 from furax.obs.stokes import StokesQU
 
+__all__ = [
+    'get_maps_from_Stokes',
+    'get_diagonal_operator_from_stokes_maps',
+    'get_preconditioner',
+]
 
 def get_maps_from_Stokes(final_maps):
     if isinstance(final_maps, StokesQU):

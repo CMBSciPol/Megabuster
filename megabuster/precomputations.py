@@ -1,21 +1,26 @@
+import os
 import numpy as np
 import scipy
 from scipy.sparse import csr_matrix
 from tqdm import tqdm
 
-def get_data_ind_j(matrix: scipy.sparse.sparray, path_save):
+__all__ = [
+    'save_data_ind_j',
+    'compute_threshold_matrices',
+]
+
+def save_data_ind_j(matrix: scipy.sparse.sparray, path_save, disable_tqdm=True):
     """ Retrieve the data and indices of the non-zero elements of a sparse matrix
     and return them in a format that can be used to create a furax operator.
     """
 
-    print("## Getting data and indices", flush=True)
+    if os.path.exists(path_save):
+        print(f"## File {path_save} already exists, skipping computation.", flush=True)
+
     ind_i, ind_j, data = scipy.sparse.find(matrix)
     
-    print("## Getting unique values and counts", flush=True)
     values_i, first_indices_i, counts_i = np.unique(ind_i, return_counts=True, return_index=True)
-    print("## Getting unique values and counts -- 2", flush=True)
     values_j, first_indices_j, counts_j = np.unique(ind_j, return_counts=True, return_index=True)
-    print("## Getting unique values and counts -- 3", flush=True)
     
     n_data = len(values_i)
     n_pix = n_data//2
@@ -33,10 +38,8 @@ def get_data_ind_j(matrix: scipy.sparse.sparray, path_save):
 
     first_indices_i = np.append(first_indices_i, ind_j.size + 1)
     first_indices_j = np.append(first_indices_j, ind_i.size + 1)
-    print("## Entering loop", flush=True)
 
-    for j in tqdm(range(n_data)): # Loop on the indices in the mask
-
+    for j in tqdm(range(n_data), disable=disable_tqdm): # Loop on the indices in the mask
         new_ind_i[j,:counts_i[j]] = ind_j[first_indices_i[j]:first_indices_i[j+1]]
         new_data_i[j,:counts_i[j]] = data[first_indices_i[j]:first_indices_i[j+1]]
         
@@ -44,7 +47,6 @@ def get_data_ind_j(matrix: scipy.sparse.sparray, path_save):
         new_ind_j[j,:counts_j[j]] = ind_i[indices_]
         new_data_j[j,:counts_j[j]] = data[indices_]
         
-    print("Exiting loop", flush=True)
 
 
     new_data_i = np.array(new_data_i, dtype=np.float64)
@@ -56,7 +58,7 @@ def get_data_ind_j(matrix: scipy.sparse.sparray, path_save):
     print(f"## Saving to {path_save}", flush=True)
     np.savez(path_save, new_data_i=new_data_i, new_ind_i=new_ind_i, new_data_j=new_data_j, new_ind_j=new_ind_j, values_i=values_i, values_j=values_j, counts_i=counts_i, counts_j=counts_j)
 
-def compute_threshold_matrices(list_threshold, list_sparse_matrix, list_path_save, nstokes=2):
+def compute_threshold_matrices(list_threshold, list_sparse_matrix, list_path_save, nstokes=2, disable_tqdm=True):
     """ Compute the threshold matrices for a list of matrices and save them to a file.
     
     Parameters
@@ -75,8 +77,7 @@ def compute_threshold_matrices(list_threshold, list_sparse_matrix, list_path_sav
     
     npix = list_sparse_matrix[0].shape[0] // nstokes
 
-    for i in tqdm(n_freq):
-        
+    for i in range(n_freq):
         big_matrix = list_sparse_matrix[i].copy()
 
         cond = np.abs(big_matrix.data) < list_threshold[i]
@@ -86,5 +87,5 @@ def compute_threshold_matrices(list_threshold, list_sparse_matrix, list_path_sav
 
         for j in range(nstokes):
             for k in range(nstokes):
-                get_data_ind_j(big_matrix[j*npix:(j+1)*npix, k*npix:(k+1)*npix], f"{list_path_save[i]}_threshold_{i}_stokes_{label_stokes[j]}_{label_stokes[k]}.npz")
+                save_data_ind_j(big_matrix[j*npix:(j+1)*npix, k*npix:(k+1)*npix], f"{list_path_save[i]}_threshold_{list_threshold[i]}_stokes_{label_stokes[j]}_stokes_{label_stokes[k]}.npz", disable_tqdm=disable_tqdm)
     

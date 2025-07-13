@@ -3,12 +3,17 @@ import jax.numpy as jnp
 from jaxtyping import Array
 import equinox
 import optax
-import optax.tree_utils as otu
 
 from typing import Any, Callable, Optional
 
 from jax_grid_search._optimizers import OptimizerState, _debug_callback 
 from jax_grid_search._progressbar import ProgressBar 
+
+__all__ = [
+    'filter_optimize',
+    # 'new_filter_optimize',
+    'minimize_likelihood'
+]
 
 # @equinox.filter_jit
 def filter_optimize(init_params, fun, opt, max_iter, tol, **kwargs):
@@ -99,12 +104,12 @@ def new_filter_optimize(
     def step(carry: OptimizerState) -> OptimizerState:
         value, grad = value_and_grad_fun(carry.params, **kwargs)  # Compute value and gradient
         updates, state = opt.update(grad, carry.state, carry.params, value=carry.value, grad=grad, value_fn=fun, **kwargs)  # Perform update
-        update_norm = otu.tree_l2_norm(updates)  # Compute update norm
+        update_norm = optax.tree_utils.tree_l2_norm(updates)  # Compute update norm
         params = optax.apply_updates(carry.params, updates)  # Update params
         if upper_bound is not None and lower_bound is not None:
             params = optax.projections.projection_box(params, lower_bound, upper_bound)  # Apply box constraints
         if log_updates and carry.update_history is not None:
-            iter_num = otu.tree_get(carry.state, "count")
+            iter_num = optax.tree_utils.tree_get(carry.state, "count")
             to_log = jnp.array([update_norm, value])
             carry = carry._replace(update_history=carry.update_history.at[iter_num].set(to_log))
 
@@ -116,7 +121,7 @@ def new_filter_optimize(
         best_val = jnp.where((carry.best_val < value) | jnp.isnan(value), carry.best_val, value)
 
         if progress:
-            iter_num = otu.tree_get(carry.state, "count")
+            iter_num = optax.tree_utils.tree_get(carry.state, "count")
             progress.update(progress_id, (update_norm, tol, iter_num, carry.value, max_iter), desc_cb=_debug_callback, total=max_iter)
 
         return carry._replace(
@@ -131,7 +136,7 @@ def new_filter_optimize(
 
     # Stopping condition.
     def continuing_criterion(carry: OptimizerState) -> Any:
-        iter_num = otu.tree_get(carry.state, "count")  # Get iteration count from optimizer state
+        iter_num = optax.tree_utils.tree_get(carry.state, "count")  # Get iteration count from optimizer state
         iter_num = 0 if iter_num is None else iter_num
         update_norm = carry.update_norm
         return (iter_num == 0) | ((iter_num < max_iter) & (update_norm >= tol))
@@ -165,7 +170,7 @@ def minimize_likelihood(first_guess_params,
         fun, 
         max_iter=100, 
         tol=1e-5,
-        optimize_func=optimize):
+        optimize_func=filter_optimize):
     
     solver = optax.lbfgs()
     return optimize_func(

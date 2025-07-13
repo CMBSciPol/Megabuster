@@ -9,7 +9,14 @@ from furax.obs.stokes import StokesQU
 from furax import AbstractLinearOperator, square
 from furax.core import DiagonalOperator, IndexOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator, SumOperator, TransposeOperator
 
-
+__all__ = [
+    'get_data_ind_j',
+    'assemble_ind_j',
+    'ObsMatOperator',
+    'to_QU_operators',
+    'to_QU_operators_from_files',
+]
+    
 def get_data_ind_j(n_pix, list_matrices: list, return_operator=True):
     """ Retrieve the data and indices of the non-zero elements of a sparse matrix
     and return them in a format that can be used to create a furax operator.

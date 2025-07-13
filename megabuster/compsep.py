@@ -18,6 +18,11 @@ from megabuster.minimizers import filter_optimize, minimize_likelihood
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
 from megabuster.tools import get_diagonal_operator_from_stokes_maps, get_preconditioner, get_maps_from_Stokes
 
+__all__ = [
+    'Results',
+    'perform_compsep',
+]
+
 class Results(object):
     """
     Class to store the results of the component separation.
@@ -84,13 +89,16 @@ class Results(object):
             assert input_maps.shape[1] >= 2, "Input maps must contain at least Q and U Stokes parameters."
             
 
-            input_maps_stokes = Stokes.from_stokes(Q=input_maps[:,-2,:], U=input_maps[:,-1,:])
-            output_map_stokes = final_W_func(input_maps_stokes)
-            return np.array([get_maps_from_Stokes(output_map_stokes[key]) for key in ordering_component])
+            input_maps_stokes = Stokes.from_stokes(
+                Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
+                U=hp.reorder(input_maps[:,-1,:],r2n=True)
+            )
+            return final_W_func(input_maps_stokes)
+            # return np.array([get_maps_from_Stokes(output_map_stokes[key]) for key in ordering_component])
 
         res.W_maxL = final_W
         res.A_maxL = final_A_maxL
-        res.s = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
+        res.s = np.array([hp.reorder(final_maps[component], n2r=True) for component in range(final_maps.shape[0])])
         res.success = number_iterations < max_iter
         res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
         return res
@@ -126,7 +134,7 @@ def perform_compsep(
     dust_nu0=150.0, 
     synchrotron_nu0=20.0, 
     obs_mat_operator=None, 
-    full_sky_transpose_obsmat_operator=None,
+    obsmat_operator_rhs=None,
     use_preconditioner=True,
     sigma_perturbation=1e-6,
     diag_obsmat_matrices=None,
@@ -152,6 +160,9 @@ def perform_compsep(
         Array of frequencies in GHz.
     invN_matrix:
         Inverse noise covariance matrix object with dimensions (n_frequencies, n_stokes, n_pixels). Currently implemented so that the Stokes parameters are only Q and U. 
+    obsmat_operator_rhs: AbstractLinearOperator (optional)
+        Right-hand side of the equation corresponding to the application of O.T to invN (d). WANRNING: The operator provided is assumed to be the a function applying O.T and not O. If None, it is taken to be the transpose of the operator provided in obs_mat_operator (which is Identity of None was provided for obs_mat_operator).
+    fixed_params: dict (optional)
     dust_nu0: float (optional)
         Dust reference frequency parameter in GHz. Default is 150.0 GHz.
     synchrotron_nu0: float (optional)
@@ -183,51 +194,57 @@ def perform_compsep(
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
         assert binary_mask.ndim == 1, "Binary mask must be a 1D array."
         pixels_to_retain = np.where(binary_mask != 0)[0]
+        pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
     else:
         pixels_to_retain = np.ones_like(invN_matrix.shape[-1], dtype=bool)
+        pixels_to_retain_nested = np.ones_like(pixels_to_retain)
     
     assert invN_matrix.ndim == 3, "Inverse noise covariance matrix must have shape (n_frequencies, n_stokes, n_pixels)."
     assert invN_matrix.shape[1] == 2, "Inverse noise covariance matrix must contain only Q and U Stokes parameters."
     
 
-    invN_matrix = invN_matrix[..., pixels_to_retain]
-    invN_matrix_nested = np.zeros_like(invN_matrix)
+    invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain_nested.size,))
     
     for i in range(invN_matrix.shape[0]):
-        invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)    
-        
-    if isinstance(sky_map, jnp.ndarray):
+        invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)[..., pixels_to_retain_nested]
+
+    
+
+    if isinstance(sky_map, ArrayLike):
         assert sky_map.ndim == 3, "Sky map must have shape (n_frequencies, n_stokes, n_pixels)."
         assert sky_map.shape[1] == 2, "Sky map must contain only Q and U Stokes parameters."
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain], 
-            U=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain]
+            Q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
+            U=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
         )
     else:
         assert sky_map.q.shape[0] == sky_map.u.shape[0], "Sky map must have the same number of Q and U Stokes parameters."
         assert sky_map.q.shape[1] == sky_map.u.shape[1], "Sky map must have the same number of pixels for Q and U Stokes parameters."
         # Retain only the pixels that are not masked
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain], 
-            U=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain]
+            Q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
+            U=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
         )
 
     # Prepare the in_structure of the upcoming operators
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
     in_structure_noise_cov = sky_map.structure.q
 
-    invN = get_diagonal_operator_from_stokes_maps(invN_matrix, in_structure_noise_cov)
+    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, in_structure_noise_cov)
 
     # Prepare the observation matrix operator
     if obs_mat_operator is None:
         obs_mat_operator = IdentityOperator(invN.in_structure())
     
-    if full_sky_transpose_obsmat_operator is None:
-        full_sky_transpose_obsmat_operator = obs_mat_operator.T
+    if obsmat_operator_rhs is None:
+        obsmat_operator_rhs = obs_mat_operator.T
+        # obsmat_operator_rhs = IdentityOperator(invN.in_structure())
     
     # Precompute part of the right-hand side of the CG equation
-    ONd = full_sky_transpose_obsmat_operator(invN(sky_map))
+    print("Precomputing the right-hand side of the CG equation . . .", flush=True)
+    ONd = obsmat_operator_rhs(invN(sky_map))
     ONd.q.block_until_ready()
+    print("Right-hand side of the CG equation precomputed!", flush=True)
 
     
 
@@ -235,12 +252,14 @@ def perform_compsep(
         diagonal_ONO_array = jnp.copy(invN_matrix_nested)
     else:
             
-        if diag_obsmat_matrices.shape[-1] == pixels_to_retain.size:
+        if diag_obsmat_matrices.shape[-1] == pixels_to_retain_nested.size:
             print("Using diag obsmat matrices")
-            diag_obsmat_matrices = diag_obsmat_matrices[..., pixels_to_retain]
+            diag_obsmat_matrices = diag_obsmat_matrices[..., pixels_to_retain_nested]
 
         print("Using diag offdiag obsmat")
-        diag_obsmat = jnp.array(diag_obsmat_matrices).reshape((len(frequencies), 2, invN_matrix_nested.shape[-1]))
+        diag_obsmat = jnp.array(diag_obsmat_matrices)
+        if diag_obsmat.shape[-1] != pixels_to_retain_nested.size:
+            diag_obsmat = diag_obsmat[..., pixels_to_retain_nested]
         diagonal_ONO_array = jnp.einsum('fsp,fsp,fsp->fsp', diag_obsmat, invN_matrix_nested, diag_obsmat)
         
     number_components = 3 # CMB, dust, synchrotron
@@ -351,37 +370,39 @@ def perform_compsep(
         max_iter=max_iter, 
         tol=tol,
         optimize_func=optimize_func) # first output is the final parameters, second output is the final state of the optimizer 
-
-    print("Minimization finished!! Now retrieving maps . . .", flush=True)
-    A_maxL, final_maps = get_A_s_AOND(output_params, full_sky_transpose_obsmat_operator(invN(sky_map)))[:2]
+    output_params[list(first_guess_params.keys())[0]].block_until_ready()
+    print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
+    A_maxL, final_maps = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
 
     A_maxL_array = np.zeros((frequencies.size, number_components))
     for component in range(number_components):
-        A_maxL_array = A_maxL_array.at[:,component].set(A_maxL.block_leaves[component]._diagonal.squeeze())
+        A_maxL_array[:,component] = A_maxL.block_leaves[component]._diagonal.squeeze()
+
+
+    final_maps_nested = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
+
+    final_maps_full_sky = np.zeros((number_components, final_maps_nested.shape[-2], binary_mask.shape[-1]), dtype=final_maps_nested.dtype)
+    final_maps_full_sky[..., pixels_to_retain_nested] = final_maps_nested
+
+
+    def W_maxL(input_map):
             
-    def W_maxL(input_map, input_is_ring=False):
-        assert input_map.ndim == 3, "Input map must have shape (n_frequencies, n_stokes, n_pixels)."
+        output_map_truncated = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
+
+        output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
+
+        output_map = np.zeros((number_components,output_map_nested.shape[-2], input_map.shape[-1]), dtype=output_map_nested.dtype)
         
-        if input_is_ring:
-            new_input_map = np.zeros_like(input_map)
-            for i in range(input_map.shape[0]):
-                new_input_map[i] = hp.reorder(input_map[i], r2n=True)
-            input_map = new_input_map    
-            
-        output_map_truncated = get_A_s_AOND(output_params, full_sky_transpose_obsmat_operator(invN(input_map[...,pixels_to_retain])))[1]
-
-        output_map = np.zeros(((number_components,) + output_map_truncated.shape[-2:]), dtype=output_map_truncated.dtype)
-        for j in range(number_components):
-            output_map[j, :, pixels_to_retain] = output_map_truncated
-            output_map[j] = hp.reorder(output_map[j], n2r=True)
-
+        output_map[..., pixels_to_retain_nested] = output_map_nested
+        for i in range(number_components):
+            output_map[i] = hp.reorder(output_map[i], n2r=True)
         return output_map
 
     return Results.from_compsep_results(
         output_params, 
         W_maxL, 
         A_maxL_array,
-        final_maps, 
+        final_maps_full_sky, 
         output_state[0].count, 
         max_iter, 
         ordering_parameter=ordering_parameter, 
