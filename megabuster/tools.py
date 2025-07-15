@@ -1,4 +1,5 @@
 import numpy as np
+import healpy as hp
 from jaxtyping import ArrayLike
 
 from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator
@@ -8,6 +9,7 @@ __all__ = [
     'get_maps_from_Stokes',
     'get_diagonal_operator_from_stokes_maps',
     'get_preconditioner',
+    'get_healpix_indices_patch_from_mask',
 ]
 
 def get_maps_from_Stokes(final_maps):
@@ -84,3 +86,31 @@ def get_preconditioner(preconditioner_matrix, in_structure):
             ) for num_cpt_1, component_1 in enumerate(['cmb', 'dust', 'synchrotron'])
         }) for num_cpt_0, component_0 in enumerate(['cmb', 'dust', 'synchrotron'])
     })
+
+def get_healpix_indices_patch_from_mask(mask, nside_patches):
+    """
+    Get the healpix indices of the patches from a mask.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        The mask to get the indices from.
+    nside_patches : int
+        The nside of the patches.
+
+    Returns
+    -------
+    np.ndarray
+        The healpix indices of the patches.
+    """
+    all_indices = hp.ud_grade(np.arange(12*nside_patches**2), nside_out=hp.npix2nside(mask.size))
+
+    values = np.unique((all_indices + 1) * mask)
+
+    new_indices = np.zeros_like(all_indices, dtype=np.int32)
+    for i, value in enumerate(values):
+        location_indices = np.where((all_indices + 1) * mask == value)[0]
+        if location_indices.size > 0: 
+            new_indices[location_indices] = i
+
+    return new_indices[mask != 0] - 1

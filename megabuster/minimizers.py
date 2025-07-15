@@ -11,7 +11,7 @@ from jax_grid_search._progressbar import ProgressBar
 
 __all__ = [
     'filter_optimize',
-    # 'new_filter_optimize',
+    'new_filter_optimize',
     'minimize_likelihood'
 ]
 
@@ -94,6 +94,10 @@ def new_filter_optimize(
     log_updates: bool = False,
     **kwargs: Any,
 ) -> tuple[Array, OptimizerState]:
+    """
+    Code inspired from github.com/ASKabalan/jax-grid-search/blob/main/src/jax_grid_search/_optimizers.py 
+    and adapted to equinox
+    """
     # Define a function that computes both value and gradient of the objective.
     # value_and_grad_fun = jax.value_and_grad(fun)
     value_and_grad_fun = equinox.filter_value_and_grad(fun)

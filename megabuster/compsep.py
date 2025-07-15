@@ -146,7 +146,8 @@ def perform_compsep(
     max_iter=1,
     tol=1e-5,
     ordering_parameter=['beta_dust', 'beta_pl'], 
-    ordering_component=['cmb', 'dust', 'synchrotron']
+    ordering_component=['cmb', 'dust', 'synchrotron'],
+    patch_indices=None
     ):
     """
     Perform component separation using the given parameters and data.
@@ -193,6 +194,7 @@ def perform_compsep(
     assert 'beta_dust' in first_guess_params or 'beta_dust' in fixed_params, "First guess parameters must contain 'beta_dust'."
     assert 'beta_pl' in first_guess_params or 'beta_pl' in fixed_params, "First guess parameters must contain 'beta_pl'."
     assert isinstance(sky_map, (Stokes, ArrayLike)), "Sky map must be a Stokes object or a ndarray."
+
     
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
@@ -203,6 +205,17 @@ def perform_compsep(
         pixels_to_retain = np.ones_like(invN_matrix.shape[-1], dtype=bool)
         pixels_to_retain_nested = np.ones_like(pixels_to_retain)
     
+    if patch_indices is not None:
+        assert np.all(np.isin(list(patch_indices.keys()), ['temp_dust_patches', 'beta_dust_patches', 'beta_pl_patches'])), "Single patch indices must be a dictionary with keys 'temp_dust_patches', 'beta_dust_patches', and 'beta_pl_patches'."
+        for key_patch in ['temp_dust_patches', 'beta_dust_patches', 'beta_pl_patches']:
+            if key_patch not in patch_indices:
+                patch_indices[key_patch] = None
+            elif patch_indices[key_patch] is not None:
+                full_size_patch_indices = np.zeros_like(binary_mask)
+                full_size_patch_indices[pixels_to_retain] = patch_indices[key_patch]
+                patch_indices[key_patch] = np.array(hp.reorder(full_size_patch_indices, r2n=True)[pixels_to_retain_nested], dtype=int)
+                
+
     assert invN_matrix.ndim == 3, "Inverse noise covariance matrix must have shape (n_frequencies, n_stokes, n_pixels)."
     assert invN_matrix.shape[1] == 2, "Inverse noise covariance matrix must contain only Q and U Stokes parameters."
     
@@ -267,6 +280,7 @@ def perform_compsep(
         diagonal_ONO_array = jnp.einsum('fsp,fsp,fsp->fsp', diag_obsmat, invN_matrix_nested, diag_obsmat)
         
     number_components = 3 # CMB, dust, synchrotron
+    n_pix = pixels_to_retain_nested.size
 
     def get_A_s_AOND(params, right_member=ONd):
         """
@@ -282,19 +296,19 @@ def perform_compsep(
                 parameters_dict[param_name] = fixed_params[param_name]
 
         # Mixing matrix operator
-        A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0)
+        A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
 
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
 
         preconditioner = None
         if use_preconditioner:
-            matrix_A = jnp.zeros((frequencies.size, number_components))
+            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
             for component in range(number_components):
-                matrix_A = matrix_A.at[:,component].set(A.block_leaves[component]._diagonal.squeeze())
+                matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
             
             # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
-            preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fc,fsp,fk->psck', matrix_A, diagonal_ONO_array, matrix_A)).T)
+            preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fcp,fsp,fkp->psck', matrix_A, diagonal_ONO_array, matrix_A)).T)
 
             # Prepare the preconditioner operator
             preconditioner = get_preconditioner(
@@ -354,13 +368,13 @@ def perform_compsep(
             parameters_dict, 
             in_structure_sed, 
             dust_nu0=dust_nu0, 
-            synchrotron_nu0=synchrotron_nu0
+            synchrotron_nu0=synchrotron_nu0, 
+            patch_indices=patch_indices
         )
 
         left_hand_term = ONd - (obs_mat_operator.T @ invN @ obs_mat_operator @ A)(map_s)
 
         keys_params = params.keys()
-
 
         final_grad_log = 0
         for key in keys_params:
@@ -375,12 +389,13 @@ def perform_compsep(
         tol=tol,
         optimize_func=optimize_func) # first output is the final parameters, second output is the final state of the optimizer 
     output_params[list(first_guess_params.keys())[0]].block_until_ready()
+    print(output_params, flush=True)
     print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
     A_maxL, final_maps = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
 
-    A_maxL_array = np.zeros((frequencies.size, number_components))
+    A_maxL_array = np.zeros((frequencies.size, number_components, n_pix))
     for component in range(number_components):
-        A_maxL_array[:,component] = A_maxL.block_leaves[component]._diagonal.squeeze()
+        A_maxL_array[:,component] = A_maxL.block_leaves[component]._diagonal
 
 
     final_maps_nested = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])

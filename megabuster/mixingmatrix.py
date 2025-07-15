@@ -14,8 +14,12 @@ __all__ = [
     'SynchrotronDerivOperator',
 ]
 
-
-def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0):
+single_patch_indices = {
+    'temp_dust_patches': None,
+    'beta_dust_patches': None,
+    'beta_pl_patches': None,
+}
+def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
     """
     Create a MixingMatrixOperator object using the provided parameters.
 
@@ -39,22 +43,31 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
         Mixing matrix operator object.
 
     """
+    if patch_indices is None:
+        patch_indices = single_patch_indices
+
     cmb = CMBOperator(frequencies, in_structure=in_structure_sed)
     dust = DustOperator(
         frequencies,
         frequency0=dust_nu0,
         temperature=parameters_dict['temp_dust'],
         beta=parameters_dict['beta_dust'],
-        in_structure=in_structure_sed,
+        temperature_patch_indices=patch_indices['temp_dust_patches'],
+        beta_patch_indices=patch_indices['beta_dust_patches'],
+        in_structure=in_structure_sed
     )
     synchrotron = SynchrotronOperator(
-        frequencies, frequency0=synchrotron_nu0, beta_pl=parameters_dict['beta_pl'], in_structure=in_structure_sed
+        frequencies, 
+        frequency0=synchrotron_nu0, 
+        beta_pl=parameters_dict['beta_pl'], 
+        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
+        in_structure=in_structure_sed
     )
 
     # Mixing matrix operator
     return MixingMatrixOperator(cmb=cmb, dust=dust, synchrotron=synchrotron)
 
-def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0):
+def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
     """
     Create a MixingMatrixOperator object using the provided parameters.
 
@@ -78,16 +91,26 @@ def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure
         Mixing matrix operator object.
 
     """
+
+    if patch_indices is None:
+        patch_indices = single_patch_indices
+
     cmb_derivative = CMBDerivOperator(frequencies, in_structure=in_structure_sed)
     dust_derivative = DustDerivOperator(
         frequencies,
         frequency0=dust_nu0,
         temperature=parameters_dict['temp_dust'],
         beta=parameters_dict['beta_dust'],
+        temperature_patch_indices=patch_indices['temp_dust_patches'],
+        beta_patch_indices=patch_indices['beta_dust_patches'],
         in_structure=in_structure_sed,
     )
     synchrotron_derivative = SynchrotronDerivOperator(
-        frequencies, frequency0=synchrotron_nu0, beta_pl=parameters_dict['beta_pl'], in_structure=in_structure_sed
+        frequencies, 
+        frequency0=synchrotron_nu0, 
+        beta_pl=parameters_dict['beta_pl'], 
+        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
+        in_structure=in_structure_sed
     )
 
     # Mixing matrix operator
