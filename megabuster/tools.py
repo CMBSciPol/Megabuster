@@ -87,7 +87,7 @@ def get_preconditioner(preconditioner_matrix, in_structure):
         }) for num_cpt_0, component_0 in enumerate(['cmb', 'dust', 'synchrotron'])
     })
 
-def get_healpix_indices_patch_from_mask(mask, nside_patches):
+def get_healpix_indices_patch_from_mask(mask, nside_patches, nest=False):
     """
     Get the healpix indices of the patches from a mask.
 
@@ -103,7 +103,14 @@ def get_healpix_indices_patch_from_mask(mask, nside_patches):
     np.ndarray
         The healpix indices of the patches.
     """
-    all_indices = hp.ud_grade(np.arange(12*nside_patches**2), nside_out=hp.npix2nside(mask.size))
+    if nest:
+        order_in = 'NESTED'
+        order_out = 'NESTED'
+    else:
+        order_in = 'RING'
+        order_out = 'RING'
+    
+    all_indices = hp.ud_grade(np.arange(12*nside_patches**2), nside_out=hp.npix2nside(mask.size), order_in=order_in, order_out=order_out)
 
     values = np.unique((all_indices + 1) * mask)
 
