@@ -2,12 +2,13 @@ import numpy as np
 import healpy as hp
 from jaxtyping import ArrayLike
 
-from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator
+from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator, BlockRowOperator, BroadcastDiagonalOperator
 from furax.obs.stokes import StokesQU
 
 __all__ = [
     'get_maps_from_Stokes',
     'get_diagonal_operator_from_stokes_maps',
+    'get_A_from_array',
     'get_preconditioner',
     'get_healpix_indices_patch_from_mask',
 ]
@@ -86,6 +87,15 @@ def get_preconditioner(preconditioner_matrix, in_structure):
             ) for num_cpt_1, component_1 in enumerate(['cmb', 'dust', 'synchrotron'])
         }) for num_cpt_0, component_0 in enumerate(['cmb', 'dust', 'synchrotron'])
     })
+
+def get_A_from_array(matrix_A, in_structure_sed):
+    if matrix_A.ndim == 2:
+        matrix_to_build = matrix_A[..., None]
+    else:
+        matrix_to_build = matrix_A
+    return BlockRowOperator(
+        {component:BroadcastDiagonalOperator(matrix_to_build[num_cpt,...],in_structure=in_structure_sed,) for num_cpt, component in enumerate(['cmb', 'dust', 'synchrotron'])}
+    )
 
 def get_healpix_indices_patch_from_mask(mask, nside_patches, nest=False):
     """
