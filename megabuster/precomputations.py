@@ -1,7 +1,10 @@
-import os
+import os, time
 import numpy as np
+import jax.numpy as jnp
 import scipy
+import healpy as hp
 from scipy.sparse import csr_matrix
+from opt_einsum import contract
 from tqdm import tqdm
 
 __all__ = [
@@ -88,4 +91,51 @@ def compute_threshold_matrices(list_threshold, list_sparse_matrix, list_path_sav
         for j in range(nstokes):
             for k in range(nstokes):
                 save_data_ind_j(big_matrix[j*npix:(j+1)*npix, k*npix:(k+1)*npix], f"{list_path_save[i]}_threshold_{list_threshold[i]}_stokes_{label_stokes[j]}_stokes_{label_stokes[k]}.npz", disable_tqdm=disable_tqdm)
+
+def compute_eigenspectrum_from_matrices(
+    list_scipy_obsmat_masked, 
+    inverse_noisecov_QU_ring, 
+    mask_B_nest, 
+    path_output
+):
+    """ Compute the eigenspectrum of the matrices O^T N^{-1} O for each frequency,
+    where O is the observation matrix and N is the noise covariance matrix.
+    The matrices are computed only on the pixels where the mask is non-zero.
+    """
+
+    n_freq = len(list_scipy_obsmat_masked)
+
+    if inverse_noisecov_QU_ring.shape[-1] == mask_B_nest.size:
+        ellipsis = ...,mask_B_nest!=0
+    else:
+        ellipsis = (...,)
+
+
+    inverse_noisecov_QU_masked_nested = jnp.zeros(inverse_noisecov_QU_ring.shape[:-1] + (mask_B_nest[mask_B_nest!=0].size,))
+    for idx_freq in range(n_freq):
+        template = np.zeros((3, mask_B_nest.size))
+        template[...,mask_B_nest!=0] = inverse_noisecov_QU_ring[idx_freq,*ellipsis]
+        inverse_noisecov_QU_masked_nested[idx_freq,...] = hp.reorder(template, n2r=True, nest=True)[...,mask_B_nest!=0]
     
+    for idx_freq in range(n_freq):
+        obsmat_array = jnp.array(list_scipy_obsmat_masked[idx_freq].todense())
+
+        time_start = time.time()
+        array_to_eigen = contract(
+            'ab,b,bc->ac', 
+            obsmat_array.T, 
+            inverse_noisecov_QU_masked_nested[idx_freq].ravel(), 
+            obsmat_array
+        )
+        array_to_eigen.block_until_ready()
+        print("Finish computation in", time.time()-time_start, flush=True)
+        
+        print("Starting eigenvalue decomp", flush=True)
+        eigvals, eigvecs = jnp.linalg.eigh(array_to_eigen)
+        eigvals.block_until_ready()
+        print("Finishing eigenvalue decomp", flush=True)
+        print('---', jnp.min(eigvals), jnp.max(eigvals), jnp.mean(eigvals), jnp.std(eigvals), flush=True)
+
+        name_output = f'results_{idx_freq}_eigendecomp'
+        print("Saving to: ", path_output+name_output+'.npz', flush=True)
+        jnp.savez(path_output+name_output+'.npz', eigvals=eigvals, eigvecs=eigvecs)

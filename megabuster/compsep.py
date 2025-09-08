@@ -9,15 +9,21 @@ from typing import Callable
 
 import operator
 
-from furax.core import IdentityOperator, BlockColumnOperator, BlockRowOperator, DenseBlockDiagonalOperator
+from furax.core import IdentityOperator
 from furax.tree import as_structure
-from furax.obs.stokes import Stokes, StokesQU
+from furax.obs.stokes import Stokes
 
 # from furax import Config
 
 from megabuster.minimizers import filter_optimize, minimize_likelihood
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
-from megabuster.tools import get_diagonal_operator_from_stokes_maps, get_preconditioner, get_A_from_array, get_maps_from_Stokes
+from megabuster.tools import (
+    get_diagonal_operator_from_stokes_maps, 
+    get_preconditioner, 
+    get_A_from_array, 
+    get_maps_from_Stokes, 
+    get_dense_furax_operator_from_freq_array
+)
 
 __all__ = [
     'Results',
@@ -184,11 +190,14 @@ def perform_compsep(
         - beta_dust: Dust spectral index parameter.
         - beta_pl: Synchrotron spectral index parameter.
     sky_map: Stokes or ndarray
-        StokesPyTree object or ndarray containing the sky map. Assumes to only contain Q and U Stokes parameters. If ndarray, the shape must be (n_frequencies, n_stokes, n_pixels).
+        StokesPyTree object or ndarray containing the sky map. Assumes to only contain Q and U Stokes parameters. 
+        
+        If ndarray, the shape must be (n_frequencies, n_stokes, n_pixels).
     frequencies: jnp.ndarray
         Array of frequencies in GHz.
     invN_matrix:
-        Inverse noise covariance matrix object with dimensions (n_frequencies, n_stokes, n_pixels). Currently implemented so that the Stokes parameters are only Q and U. 
+        Inverse noise covariance matrix object with dimensions (n_frequencies, n_stokes, n_pixels). 
+        Currently implemented so that the Stokes parameters are only Q and U. 
     do_minimization: bool (optional)
         Whether to perform the minimization or not. If False, the first_guess_params are used as output parameters. Default is True.
     fixed_params: dict (optional)
@@ -210,7 +219,7 @@ def perform_compsep(
         M must be a function compilable and jittable with JAX, ideally a FURAX operator, and applicable directly on nested masked Stokes objects.
         If None, it is taken to be the composition of the operator provided in obs_mat_operator (which is Identity of None was provided for obs_mat_operator) with invN and its transpose.
     obs_mat_operator: AbstractLinearOperator (optional)
-        Observation matrix operator, which must be a function compilable and jittable with JAX,  ideally a FURAX operator, and applicable directly on nested masked Stokes objects.
+        Observation matrix operator, which must be a function compilable and jittable with JAX, ideally a FURAX operator, and applicable directly on nested masked Stokes objects.
         Default is None and is taken to be the identity operator. Not used if central_freq_op is provided. 
     obsmat_operator_rhs: AbstractLinearOperator (optional)
         Right-hand side of the equation corresponding to the application of O.T to invN (d). WANRNING: The operator provided is assumed to be the a function applying O.T and not O. If None, it is taken to be the transpose of the operator provided in obs_mat_operator (which is Identity of None was provided for obs_mat_operator).
@@ -365,24 +374,8 @@ def perform_compsep(
             central_matrix_precond = matrix_precond[..., pixels_to_retain_nested, pixels_to_retain_nested]
         else:
             central_matrix_precond = matrix_precond
-
-
-        inv_ops_Q = BlockRowOperator(
-            StokesQU(
-                DenseBlockDiagonalOperator(central_matrix_precond[:,0,0,...], in_structure_noise_cov, subscripts='fqp,fp->fq'), 
-                DenseBlockDiagonalOperator(central_matrix_precond[:,0,1,...], in_structure_noise_cov, subscripts='fqp,fp->fq')
-            )
-        )
-        inv_ops_U = BlockRowOperator(
-            StokesQU(
-                DenseBlockDiagonalOperator(central_matrix_precond[:,1,0,...], in_structure_noise_cov, subscripts='fqp,fp->fq'), 
-                DenseBlockDiagonalOperator(central_matrix_precond[:,1,1,...], in_structure_noise_cov, subscripts='fqp,fp->fq')
-            )
-        )
-
-
-        list_QU_inv_operators = [inv_ops_Q, inv_ops_U]
-        central_operator_precond = BlockColumnOperator(StokesQU(*list_QU_inv_operators))
+        
+        central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
         
     number_components = 3 # CMB, dust, synchrotron
     n_pix = pixels_to_retain_nested.size
@@ -444,7 +437,11 @@ def perform_compsep(
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
 
         diagonal_central_term = (A.T @ central_freq_op @ A).I(
-            solver=lx.CG(rtol=dictionary_parameters_CG['tol'], atol=dictionary_parameters_CG['tol'], max_steps=dictionary_parameters_CG['max_steps_CG']), 
+            solver=lx.CG(
+                rtol=dictionary_parameters_CG['tol'], 
+                atol=dictionary_parameters_CG['tol'], 
+                max_steps=dictionary_parameters_CG['max_steps_CG']
+            ), 
             preconditioner=preconditioner
         )
         first_central_term =  diagonal_central_term(AOND)
@@ -516,7 +513,8 @@ def perform_compsep(
             spectral_likelihood_custom_gradient, 
             max_iter=dictionary_parameters_minimization['max_iter'], 
             tol=dictionary_parameters_minimization['tol'],
-            optimize_func=optimize_func) # first output is the final parameters, second output is the final state of the optimizer 
+            optimize_func=optimize_func
+        ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)
         print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)

@@ -2,7 +2,7 @@ import numpy as np
 import healpy as hp
 from jaxtyping import ArrayLike
 
-from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator, BlockRowOperator, BroadcastDiagonalOperator
+from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator, BlockRowOperator, BroadcastDiagonalOperator, DenseBlockDiagonalOperator
 from furax.obs.stokes import StokesQU
 
 __all__ = [
@@ -87,6 +87,28 @@ def get_preconditioner(preconditioner_matrix, in_structure):
             ) for num_cpt_1, component_1 in enumerate(['cmb', 'dust', 'synchrotron'])
         }) for num_cpt_0, component_0 in enumerate(['cmb', 'dust', 'synchrotron'])
     })
+
+def get_dense_furax_operator_from_freq_array(matrix, in_structure):
+    assert matrix.ndim == 4, "matrix must have shape (n_freq, n_stokes, n_stokes, n_pix, n_pix)"
+    assert matrix.shape[1] == matrix.shape[2], "matrix must be square in the Stokes parameters"
+    assert matrix.shape[3] == matrix.shape[4], "matrix must be square in the pixel space"
+    nstokes = matrix.shape[1]
+    assert nstokes == 2, "matrix must have 2 Stokes parameters (Q, U)"
+
+    ops_Q = BlockRowOperator(
+                StokesQU(
+                    DenseBlockDiagonalOperator(matrix[:,0,0,...], in_structure, subscripts='fqp,fp->fq'), 
+                    DenseBlockDiagonalOperator(matrix[:,0,1,...], in_structure, subscripts='fqp,fp->fq')
+                )
+            )
+    ops_U = BlockRowOperator(
+                StokesQU(
+                    DenseBlockDiagonalOperator(matrix[:,1,0,...], in_structure, subscripts='fqp,fp->fq'), 
+                    DenseBlockDiagonalOperator(matrix[:,1,1,...], in_structure, subscripts='fqp,fp->fq')
+                )
+            )
+    list_QU_operators = [ops_Q, ops_U]
+    return BlockColumnOperator(StokesQU(*list_QU_operators))
 
 def get_A_from_array(matrix_A, in_structure_sed):
     if matrix_A.ndim == 2:
