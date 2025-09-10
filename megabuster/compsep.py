@@ -282,10 +282,10 @@ def perform_compsep(
     assert isinstance(sky_map, (Stokes, ArrayLike)), "Sky map must be a Stokes object or a ndarray."
 
     assert (use_preconditioner_diag != use_preconditioner_pinv) or (use_preconditioner_pinv == False), "Only one type of preconditioner (use_preconditioner_diag or use_preconditioner_pinv) can be used at a time."
-    assert (use_preconditioner_diag or use_preconditioner_pinv) and not (matrix_precond is None), "If a one of the preconditioners (use_preconditioner_diag or use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
+    assert (use_preconditioner_pinv == (matrix_precond is not None)), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
     
-    if dictionary_parameters_minimization['tol'] > dictionary_parameters_CG['tol']:
-        print("Warning: The tolerance for the minimization is larger than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
+    if dictionary_parameters_minimization['tol'] < dictionary_parameters_CG['tol_CG'] and do_minimization:
+        print("Warning: The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
 
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
@@ -380,6 +380,7 @@ def perform_compsep(
     number_components = 3 # CMB, dust, synchrotron
     n_pix = pixels_to_retain_nested.size
 
+    # @equinox.filter_jit
     def get_A_s_AOND(params, right_member=ONd):
         """
             Compute the log-proba given a set of parameters 
@@ -421,8 +422,10 @@ def perform_compsep(
                 matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
             
             if patch_indices is None:
+                print("Assuming no patches for the preconditioner computation")
                 matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
             else:
+                print("Assuming patches for the preconditioner computation")
                 matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
 
             pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
@@ -438,8 +441,8 @@ def perform_compsep(
 
         diagonal_central_term = (A.T @ central_freq_op @ A).I(
             solver=lx.CG(
-                rtol=dictionary_parameters_CG['tol'], 
-                atol=dictionary_parameters_CG['tol'], 
+                rtol=dictionary_parameters_CG['tol_CG'], 
+                atol=dictionary_parameters_CG['tol_CG'], 
                 max_steps=dictionary_parameters_CG['max_steps_CG']
             ), 
             preconditioner=preconditioner

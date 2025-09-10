@@ -25,37 +25,49 @@ map_sets:
   file_prefix: ''
   freq_tag: 27
   noise_prefix: noise_
-  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT4_mission_f030_4way_coadd_sky_obsmat_healpix
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP_3/sobs_RC1.r01_SAT4_mission_f030_4way_coadd_sky_obsmat_healpix.npz
+  suffix_obsmat_scipy: _precompute # Modifications megabuster
+  suffix_eigen_decomp: _eigendecomp # Modifications megabuster
   passband_filename: ''
 - exp_tag: SAT4
   file_prefix: ''
   freq_tag: 39
   noise_prefix: noise_
-  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT4_mission_f040_4way_coadd_sky_obsmat_healpix
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP_3/sobs_RC1.r01_SAT4_mission_f040_4way_coadd_sky_obsmat_healpix.npz
+  suffix_obsmat_scipy: _precompute # Modifications megabuster
+  suffix_eigen_decomp: _eigendecomp # Modifications megabuster
   passband_filename: ''
 - exp_tag: SAT1
   file_prefix: ''
   freq_tag: 93
   noise_prefix: noise_
-  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT1_mission_f090_4way_coadd_sky_obsmat_healpix
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP_3/sobs_RC1.r01_SAT1_mission_f090_4way_coadd_sky_obsmat_healpix.npz
+  suffix_obsmat_scipy: _precompute # Modifications megabuster
+  suffix_eigen_decomp: _eigendecomp # Modifications megabuster
   passband_filename: ''
 - exp_tag: SAT1
   file_prefix: ''
   freq_tag: 145
   noise_prefix: noise_
-  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT1_mission_f150_4way_coadd_sky_obsmat_healpix
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP_3/sobs_RC1.r01_SAT1_mission_f150_4way_coadd_sky_obsmat_healpix.npz
+  suffix_obsmat_scipy: _precompute # Modifications megabuster
+  suffix_eigen_decomp: _eigendecomp # Modifications megabuster
   passband_filename: ''
 - exp_tag: SAT3
   file_prefix: ''
   freq_tag: 225
   noise_prefix: noise_
-  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT3_mission_f230_4way_coadd_sky_obsmat_healpix
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP_3/sobs_RC1.r01_SAT3_mission_f230_4way_coadd_sky_obsmat_healpix.npz
+  suffix_obsmat_scipy: _precompute # Modifications megabuster
+  suffix_eigen_decomp: _eigendecomp # Modifications megabuster
   passband_filename: ''
 - exp_tag: SAT3
   file_prefix: ''
   freq_tag: 280
   noise_prefix: noise_
-  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/sobs_RC1.r01_SAT3_mission_f290_4way_coadd_sky_obsmat_healpix
+  obsmat_path: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP_3/sobs_RC1.r01_SAT3_mission_f290_4way_coadd_sky_obsmat_healpix.npz
+  suffix_obsmat_scipy: _precompute # Modifications megabuster
+  suffix_eigen_decomp: _eigendecomp # Modifications megabuster
   passband_filename: ''
 map_sim_pars:
   A_lens: 1
@@ -103,12 +115,10 @@ output_dirs:
   mcmc: mcmc
   noise_spectra: noise_spectra
   plots: plots
-  prepoc_diag_obsmat: diag_obsmat # Modifications megabuster
+  prepoc_diag_precond: '' # Modifications megabuster
   preproc: ''
-  root: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP
+  root: /pscratch/sd/m/mag/fast_MSS2_obsmat/validation_MEGATOP_3
   spectra: spectra
-  suffix_cg_obsmat: __south_threshold_0.01 # Modifications megabuster
-  suffix_rhs_obsmat: __south # Modifications megabuster
 parametric_sep_pars:
   include_synchrotron: true
   minimize_method: 'personalized'
@@ -120,7 +130,12 @@ parametric_sep_pars:
     maxiter: 20
   minimize_tol: 1.0e-6
   passband_int: false
-  return_transpose_rhs: true # Modifications megabuster
+  megabuster_options:
+    max_steps_CG: 200
+    tol_CG: 1e-6
+    use_preconditioner_diag: false
+    use_preconditioner_pinv: true
+    
 plot_pars:
   lmax_plot: 1000
   lmin_plot: 30
