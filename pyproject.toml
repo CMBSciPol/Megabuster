@@ -31,7 +31,7 @@ dependencies = [
     'jax_grid_search',
     'numpy',
     'scipy',
-    'furax',
+    'furax @ git+https://github.com/CMBSciPol/furax.git',
     'jax',
     'equinox',
     'optax',
