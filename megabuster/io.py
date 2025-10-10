@@ -147,13 +147,13 @@ def build_obsmat_operator_from_flattened_matrices(
     
     n_freq = len(list_scipy_obsmat_masked)
     n_pix = list_scipy_obsmat_masked[0].shape[0] // nstokes
-    matrix_O = np.zeros((n_freq, nstokes, nstokes, n_pix, n_pix))
+    matrix_O = jnp.zeros((n_freq, nstokes, nstokes, n_pix, n_pix))
     
     get_matrix = lambda x: x.T if return_transpose else x
 
     for i in range(n_freq):
         for j in range(nstokes):
             for k in range(nstokes):
-                matrix_O[i,j,k,...] = np.array(get_matrix(list_scipy_obsmat_masked[i])[j*n_pix:(j+1)*n_pix, k*n_pix:(k+1)*n_pix].todense())
+                matrix_O = matrix_O.at[i,j,k,...].set(get_matrix(list_scipy_obsmat_masked[i])[j*n_pix:(j+1)*n_pix, k*n_pix:(k+1)*n_pix].todense())
 
     return get_dense_furax_operator_from_freq_array(matrix_O)

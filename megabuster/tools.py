@@ -90,16 +90,16 @@ def get_preconditioner(preconditioner_matrix, in_structure):
         }) for num_cpt_0, component_0 in enumerate(['cmb', 'dust', 'synchrotron'])
     })
 
-def get_dense_furax_operator_from_freq_array(matrix, dtype=np.float64):
+def get_dense_furax_operator_from_freq_array(matrix):
     assert matrix.ndim == 5, "matrix must have shape (n_freq, n_stokes, n_stokes, n_pix, n_pix)"
     assert matrix.shape[1] == matrix.shape[2], "matrix must be square in the Stokes parameters"
     assert matrix.shape[3] == matrix.shape[4], "matrix must be square in the pixel space"
     nstokes = matrix.shape[1]
     assert nstokes == 2, "matrix must have 2 Stokes parameters (Q, U)"
 
-    matrix = jnp.array(matrix, dtype=dtype)
+    matrix = jnp.asarray(matrix)
 
-    in_structure = jax.ShapeDtypeStruct(shape=(matrix.shape[0], matrix.shape[-1]), dtype=dtype)
+    in_structure = jax.ShapeDtypeStruct(shape=(matrix.shape[0], matrix.shape[-1]), dtype=matrix.dtype)
 
     ops_Q = BlockRowOperator(
                 StokesQU(
