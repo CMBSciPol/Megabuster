@@ -445,7 +445,8 @@ def perform_compsep(
                 atol=dictionary_parameters_CG['tol_CG'], 
                 max_steps=dictionary_parameters_CG['max_steps_CG']
             ), 
-            preconditioner=preconditioner
+            preconditioner=preconditioner,
+            callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
         )
         first_central_term =  diagonal_central_term(AOND)
 
