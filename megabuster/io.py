@@ -123,20 +123,25 @@ def load_matrix_precond(
 
             n_pix = eigvals.shape[-1] // nstokes
 
-            array_eigvecs.append(
-                [
-                    [eigvecs[i*n_pix:(i+1)*n_pix,j*n_pix:(j+1)*n_pix] for j in range(nstokes)] 
-                    for i in range(nstokes)
-                ]
-            )
-            array_eigvals.append(eigvals.reshape(2, n_pix))
+            array_eigvecs.append(eigvecs)
+            array_eigvals.append(eigvals)
 
         array_eigvals = jnp.array(array_eigvals)
         array_eigvecs = jnp.array(array_eigvecs)
         
-        return contract('fsdqp,fdp,ftdrp->fstqr', array_eigvecs, array_eigvals**(power_diagonal), array_eigvecs)
+        result_unwrapped = contract('fqp,fp,frp->fqr', array_eigvecs, array_eigvals**(power_diagonal), array_eigvecs)
 
-    return None
+
+        return jnp.array(
+        [
+            [
+                [result_unwrapped[f,i*n_pix:(i+1)*n_pix,j*n_pix:(j+1)*n_pix] 
+                    for j in range(nstokes)
+                ] 
+                for i in range(nstokes)
+            ]
+        for f in range(n_freq)]
+    )
 
 
 def build_obsmat_operator_from_flattened_matrices(
