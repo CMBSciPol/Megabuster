@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 import equinox
 import optax
+from optax._src import linesearch
 
 from typing import Any, Callable, Optional
 
@@ -176,7 +177,13 @@ def minimize_likelihood(first_guess_params,
         tol=1e-5,
         optimize_func=filter_optimize):
     
-    solver = optax.lbfgs()
+    solver = optax.lbfgs(
+        linesearch.scale_by_zoom_linesearch(
+            max_linesearch_steps=50,
+            initial_guess_strategy='one',
+            verbose=True
+        )
+    )
     return optimize_func(
         first_guess_params, 
         fun, 
