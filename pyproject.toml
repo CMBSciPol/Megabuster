@@ -32,6 +32,7 @@ dependencies = [
     'numpy',
     'scipy',
     'furax @ git+https://github.com/CMBSciPol/furax.git',
+    'furax_cs',
     'jax',
     'equinox',
     'optax',

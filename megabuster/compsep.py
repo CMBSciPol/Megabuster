@@ -15,7 +15,7 @@ from furax.obs.stokes import Stokes
 
 # from furax import Config
 
-from megabuster.minimizers import filter_optimize, minimize_likelihood
+from furax_cs import minimize
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
@@ -172,7 +172,7 @@ def perform_compsep(
     use_preconditioner_diag=False,
     use_preconditioner_pinv=False,
     matrix_precond=None,
-    optimize_func=filter_optimize,
+    optimize_func=None,
     dictionary_parameters_minimization: dict={'max_iter':1, 'tol':1e-5},
     dictionary_parameters_CG: dict={'max_steps_CG':200, 'tol_CG':1e-6},
     ordering_parameter=['beta_dust', 'beta_pl'], 
@@ -513,16 +513,17 @@ def perform_compsep(
 
     if do_minimization:
         print("Launching minimization!!", flush=True)
-        output_params, output_state = minimize_likelihood(first_guess_params, 
-            spectral_likelihood_custom_gradient, 
+        output_params, output_state = minimize(
+            init_params=first_guess_params, 
+            fn=spectral_likelihood_custom_gradient, 
             max_iter=dictionary_parameters_minimization['max_iter'], 
-            tol=dictionary_parameters_minimization['tol'],
-            optimize_func=optimize_func
+            rtol=dictionary_parameters_minimization['tol'],
+            atol=dictionary_parameters_minimization['tol'],
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)
         print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
-        number_iterations = output_state[0].count
+        number_iterations = output_state.iter_num
     else:
         print("Skipping minimization, using first guess parameters as output.", flush=True)
         output_params = first_guess_params
