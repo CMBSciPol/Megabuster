@@ -1,7 +1,6 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
-import equinox
 import lineax as lx
 import healpy as hp
 from jaxtyping import ArrayLike
@@ -12,8 +11,6 @@ import operator
 from furax.core import IdentityOperator
 from furax.tree import as_structure
 from furax.obs.stokes import Stokes
-
-# from furax import Config
 
 from furax_cs import minimize
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
@@ -380,7 +377,6 @@ def perform_compsep(
     number_components = 3 # CMB, dust, synchrotron
     n_pix = pixels_to_retain_nested.size
 
-    # @equinox.filter_jit
     def get_A_s_AOND(params, right_member=ONd):
         """
             Compute the log-proba given a set of parameters 
@@ -452,7 +448,7 @@ def perform_compsep(
 
         return A, first_central_term, AOND, diagonal_central_term
 
-    @equinox.filter_custom_jvp
+    @jax.custom_jvp
     def spectral_likelihood_custom_gradient(params):
         """
             Compute the log-proba given a set of parameters 
@@ -473,7 +469,7 @@ def perform_compsep(
         # Compute the negative log-likelihood
         return logL
 
-    @spectral_likelihood_custom_gradient.def_jvp
+    @spectral_likelihood_custom_gradient.defjvp
     def custom_gradient(primals, tangents):
         """
         Custom JVP rule for the perturbative_negative_log_prob function.

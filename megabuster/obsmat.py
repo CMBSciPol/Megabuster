@@ -3,7 +3,6 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Inexact, PyTree, ArrayLike
 import scipy
-import equinox
 
 from furax.obs.stokes import StokesQU
 from furax import AbstractLinearOperator, square
@@ -267,14 +266,14 @@ class ObsMatOperator(AbstractLinearOperator):
     def transpose(self) -> AbstractLinearOperator:
         return ObsMatOperatorTransposeOperator(self)
 
-    @equinox.filter_jit
+    @jax.jit
     def mv(self, x: PyTree[Inexact[jax.Array, '...']]) -> Inexact[jax.Array, '...']:
         return self.operator_i(x)
 
 class ObsMatOperatorTransposeOperator(TransposeOperator):
     operator: ObsMatOperator
 
-    @equinox.filter_jit
+    @jax.jit
     def mv(self, x: PyTree[Inexact[jax.Array, ' _a']]) -> PyTree[Inexact[jax.Array, ' _a']]:
         return self.operator.operator_j(x)
 
