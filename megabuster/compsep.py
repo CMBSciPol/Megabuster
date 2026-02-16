@@ -517,9 +517,11 @@ def perform_compsep(
             atol=dictionary_parameters_minimization['tol'],
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
-        print(output_params, flush=True)
-        print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
         number_iterations = output_state.iter_num
+        print(output_params, flush=True)
+        print(f"Minimization done in {number_iterations} iterations!! Preparing the retrieving of the maps . . .", flush=True)
+        
+        
     else:
         print("Skipping minimization, using first guess parameters as output.", flush=True)
         output_params = first_guess_params
