@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -15,7 +16,7 @@ from furax.obs.stokes import Stokes
 
 # from furax import Config
 
-from furax_cs import minimize
+from furax_cs import minimize, SOLVER_NAMES
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
@@ -172,7 +173,7 @@ def perform_compsep(
     use_preconditioner_diag=False,
     use_preconditioner_pinv=False,
     matrix_precond=None,
-    optimize_func=None,
+    solver_name="optax_lbfgs",
     dictionary_parameters_minimization: dict={'max_iter':1, 'tol':1e-5},
     dictionary_parameters_CG: dict={'max_steps_CG':200, 'tol_CG':1e-6},
     ordering_parameter=['beta_dust', 'beta_pl'], 
@@ -285,7 +286,9 @@ def perform_compsep(
     assert (use_preconditioner_pinv == (matrix_precond is not None)), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
     
     if dictionary_parameters_minimization['tol'] < dictionary_parameters_CG['tol_CG'] and do_minimization:
-        print("Warning: The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
+        warnings.warn("The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
+
+    assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
@@ -519,6 +522,7 @@ def perform_compsep(
             max_iter=dictionary_parameters_minimization['max_iter'], 
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
+            solver_name=solver_name
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)

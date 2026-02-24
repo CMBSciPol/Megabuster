@@ -1,4 +1,5 @@
 import os, time
+import warnings
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -129,6 +130,7 @@ def compute_eigenspectrum_from_matrices(
     mask_B_nest, 
     path_output,
     list_name_output,
+    threshold=1e-20
 ):
     """ Compute the eigenspectrum of the matrices O^T N^{-1} O for each frequency,
     where O is the observation matrix and N is the noise covariance matrix.
@@ -164,6 +166,7 @@ def compute_eigenspectrum_from_matrices(
         eigvals.block_until_ready()
         print("Finishing eigenvalue decomp", flush=True)
         print('---', jnp.min(eigvals), jnp.max(eigvals), jnp.mean(eigvals), jnp.std(eigvals), flush=True)
+        assert jnp.all(eigvals >= threshold), f"Negative eigenvalues found in the eigenspectrum of frequency {idx_freq}. The matrices are not positive semi-definitewith minimum eigenvalue: {jnp.min(eigvals)}, which can lead to numerical instabilities."
 
         print("Saving to: ", path_save, flush=True)
         jnp.savez(path_save, eigvals=eigvals, eigvecs=eigvecs)
