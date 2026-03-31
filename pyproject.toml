@@ -45,7 +45,7 @@ dynamic = ['version']
 
 [project.optional-dependencies]
 full = [
-    'fgbuster @ git+https://github.com/fgbuster/fgbuster.git@std_inst_bandpass',
+    'fgbuster @ git+https://github.com/fgbuster/fgbuster.git@master',
 ]
 
 

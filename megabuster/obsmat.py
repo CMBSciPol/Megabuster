@@ -274,6 +274,9 @@ class ObsMatOperator(AbstractLinearOperator):
 class ObsMatOperatorTransposeOperator(TransposeOperator):
     operator: ObsMatOperator
 
+    def __init__(self, *args, **keywords):
+        super().__init__(*args, **keywords)
+
     @equinox.filter_jit
     def mv(self, x: PyTree[Inexact[jax.Array, ' _a']]) -> PyTree[Inexact[jax.Array, ' _a']]:
         return self.operator.operator_j(x)

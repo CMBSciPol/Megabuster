@@ -67,7 +67,14 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
     # Mixing matrix operator
     return MixingMatrixOperator(cmb=cmb, dust=dust, synchrotron=synchrotron)
 
-def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
+def create_MixingMatrixOperator_deriv(
+        frequencies, 
+        parameters_dict, 
+        in_structure_sed, 
+        dust_nu0=150.0, 
+        synchrotron_nu0=20.0, 
+        patch_indices=None
+    ):
     """
     Create a MixingMatrixOperator object using the provided parameters.
 
@@ -95,7 +102,10 @@ def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure
     if patch_indices is None:
         patch_indices = single_patch_indices
 
-    cmb_derivative = CMBDerivOperator(frequencies, in_structure=in_structure_sed)
+    cmb_derivative = CMBDerivOperator(
+        frequencies=frequencies, 
+        in_structure=in_structure_sed,
+    )
     dust_derivative = DustDerivOperator(
         frequencies,
         frequency0=dust_nu0,
@@ -142,6 +152,9 @@ class CMBDerivOperator(CMBOperator):
         >>> result = cmbOp(sky_map)
         >>> print(result)
     """
+
+    def __init__(self, *args, **keywords):
+        super().__init__(*args, **keywords)
 
     def sed(self) -> Float[Array, '...']:
         """
@@ -191,6 +204,9 @@ class DustDerivOperator(DustOperator):
         >>> result = dustOperator(sky_map)
         >>> print(result)
     """
+
+    def __init__(self, *args, **keywords):
+        super().__init__(*args, **keywords)
 
     def sed(self) -> Float[Array, '...']:
         t = self._get_at(
@@ -249,6 +265,9 @@ class SynchrotronDerivOperator(SynchrotronOperator):
         >>> result = synchrotron_operator(sky_map)
         >>> print(result)
     """
+
+    def __init__(self, *args, **keywords):
+        super().__init__(*args, **keywords)
 
     def sed(self) -> Float[Array, '...']:
         sed = self._get_at(

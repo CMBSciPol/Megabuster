@@ -14,9 +14,8 @@ from furax.core import IdentityOperator
 from furax.tree import as_structure
 from furax.obs.stokes import Stokes
 
-# from furax import Config
-
 from furax_cs import minimize, SOLVER_NAMES
+
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
@@ -344,11 +343,10 @@ def perform_compsep(
 
     # Prepare the observation matrix operator
     if obs_mat_operator is None:
-        obs_mat_operator = IdentityOperator(invN.in_structure())
+        obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
     
     if obsmat_operator_rhs is None:
         obsmat_operator_rhs = obs_mat_operator.T
-        # obsmat_operator_rhs = IdentityOperator(invN.in_structure())
     
     if central_freq_op is None:
         central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
