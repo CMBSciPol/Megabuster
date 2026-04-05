@@ -130,6 +130,7 @@ class Results(object):
         res.W_maxL = final_W
         res.A_maxL = final_A_maxL
         res.s = np.array([hp.reorder(final_maps[component], n2r=True) for component in range(final_maps.shape[0])])
+        res.iterations_done = number_iterations
         res.success = number_iterations < max_iter
         res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
         res.W_params = final_W_params
@@ -172,8 +173,12 @@ def perform_compsep(
     use_preconditioner_diag=False,
     use_preconditioner_pinv=False,
     matrix_precond=None,
-    solver_name="optax_lbfgs",
-    dictionary_parameters_minimization: dict={'max_iter':1, 'tol':1e-5},
+    dictionary_parameters_minimization: dict={
+        'max_iter':1, 
+        'tol':1e-5,
+        'solver_name':"optax_lbfgs",
+        'options':dict()
+    },
     dictionary_parameters_CG: dict={'max_steps_CG':200, 'tol_CG':1e-6},
     ordering_parameter=['beta_dust', 'beta_pl'], 
     ordering_component=['cmb', 'dust', 'synchrotron'],
@@ -287,6 +292,7 @@ def perform_compsep(
     if dictionary_parameters_minimization['tol'] < dictionary_parameters_CG['tol_CG'] and do_minimization:
         warnings.warn("The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
 
+    solver_name = dictionary_parameters_minimization.get('solver_name', 'optax_lbfgs')
     assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
     if binary_mask is not None:
@@ -520,12 +526,14 @@ def perform_compsep(
             max_iter=dictionary_parameters_minimization['max_iter'], 
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
-            solver_name=solver_name
+            solver_name=solver_name,
+            **dictionary_parameters_minimization.get('options', dict())
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)
         print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
         number_iterations = output_state.iter_num
+        print("Finished minimization in {} iterations!".format(number_iterations), flush=True)
     else:
         print("Skipping minimization, using first guess parameters as output.", flush=True)
         output_params = first_guess_params
