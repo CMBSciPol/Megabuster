@@ -103,14 +103,30 @@ def get_dense_furax_operator_from_freq_array(matrix):
 
     ops_Q = BlockRowOperator(
                 StokesQU(
-                    DenseBlockDiagonalOperator(matrix[:,0,0,...], in_structure, subscripts='fqp,fp->fq'), 
-                    DenseBlockDiagonalOperator(matrix[:,0,1,...], in_structure, subscripts='fqp,fp->fq')
+                    DenseBlockDiagonalOperator(
+                        matrix[:,0,0,...], 
+                        in_structure=in_structure, 
+                        subscripts='fqp,fp->fq'
+                ), 
+                    DenseBlockDiagonalOperator(
+                        matrix[:,0,1,...], 
+                        in_structure=in_structure, 
+                        subscripts='fqp,fp->fq'
                 )
+            )
             )
     ops_U = BlockRowOperator(
                 StokesQU(
-                    DenseBlockDiagonalOperator(matrix[:,1,0,...], in_structure, subscripts='fqp,fp->fq'), 
-                    DenseBlockDiagonalOperator(matrix[:,1,1,...], in_structure, subscripts='fqp,fp->fq')
+                    DenseBlockDiagonalOperator(
+                        matrix[:,1,0,...], 
+                        in_structure=in_structure, 
+                        subscripts='fqp,fp->fq'
+                    ),
+                    DenseBlockDiagonalOperator(
+                        matrix[:,1,1,...], 
+                        in_structure=in_structure, 
+                        subscripts='fqp,fp->fq'
+                    )
                 )
             )
     list_QU_operators = [ops_Q, ops_U]
