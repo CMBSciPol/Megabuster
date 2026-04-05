@@ -295,6 +295,9 @@ def perform_compsep(
     solver_name = dictionary_parameters_minimization.get('solver_name', 'optax_lbfgs')
     assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
+    if do_minimization:
+        print("The minimization will be performed with the following parameters:", dictionary_parameters_minimization, flush=True)
+
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
         assert binary_mask.ndim == 1, "Binary mask must be a 1D array."
