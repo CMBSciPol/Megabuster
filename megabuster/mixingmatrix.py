@@ -19,7 +19,7 @@ single_patch_indices = {
     'beta_dust_patches': None,
     'beta_pl_patches': None,
 }
-def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
+def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None, components_list=['cmb','dust','synchrotron']):
     """
     Create a MixingMatrixOperator object using the provided parameters.
 
@@ -46,23 +46,32 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
     if patch_indices is None:
         patch_indices = single_patch_indices
 
-    cmb = CMBOperator(frequencies, in_structure=in_structure_sed)
-    dust = DustOperator(
-        frequencies,
-        frequency0=dust_nu0,
-        temperature=parameters_dict['temp_dust'],
-        beta=parameters_dict['beta_dust'],
-        temperature_patch_indices=patch_indices['temp_dust_patches'],
-        beta_patch_indices=patch_indices['beta_dust_patches'],
-        in_structure=in_structure_sed
-    )
-    synchrotron = SynchrotronOperator(
-        frequencies, 
-        frequency0=synchrotron_nu0, 
-        beta_pl=parameters_dict['beta_pl'], 
-        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
-        in_structure=in_structure_sed
-    )
+    if 'cmb' in components_list:
+        cmb = CMBOperator(frequencies, in_structure=in_structure_sed)
+    else:
+        cmb = None
+    if 'dust' in components_list:
+        dust = DustOperator(
+            frequencies,
+            frequency0=dust_nu0,
+            temperature=parameters_dict['temp_dust'],
+            beta=parameters_dict['beta_dust'],
+            temperature_patch_indices=patch_indices['temp_dust_patches'],
+            beta_patch_indices=patch_indices['beta_dust_patches'],
+            in_structure=in_structure_sed
+        )
+    else:
+        dust = None
+    if 'synchrotron' in components_list:
+        synchrotron = SynchrotronOperator(
+            frequencies, 
+            frequency0=synchrotron_nu0, 
+            beta_pl=parameters_dict['beta_pl'], 
+            beta_pl_patch_indices=patch_indices['beta_pl_patches'],
+            in_structure=in_structure_sed
+        )
+    else:
+        synchrotron = None        
 
     # Mixing matrix operator
     return MixingMatrixOperator(cmb=cmb, dust=dust, synchrotron=synchrotron)

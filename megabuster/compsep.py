@@ -174,7 +174,8 @@ def perform_compsep(
     dictionary_parameters_CG: dict={'max_steps_CG':200, 'tol_CG':1e-6},
     ordering_parameter=['beta_dust', 'beta_pl'], 
     ordering_component=['cmb', 'dust', 'synchrotron'],
-    patch_indices=None
+    patch_indices=None,
+    components_list = ['cmb', 'dust', 'synchrotron']
     ):
     """
     Perform component separation using the given parameters and data.
@@ -273,14 +274,21 @@ def perform_compsep(
 
     # Few tests
     assert isinstance(first_guess_params, dict), "First guess parameters must be stored as a dictionary."
-    assert 'temp_dust' in first_guess_params or 'temp_dust' in fixed_params, "First guess parameters must contain 'temp_dust'."
-    assert 'beta_dust' in first_guess_params or 'beta_dust' in fixed_params, "First guess parameters must contain 'beta_dust'."
-    assert 'beta_pl' in first_guess_params or 'beta_pl' in fixed_params, "First guess parameters must contain 'beta_pl'."
+    params_list = []
+    if 'dust' in components_list:
+        assert 'temp_dust' in first_guess_params or 'temp_dust' in fixed_params, "First guess parameters must contain 'temp_dust'."
+        assert 'beta_dust' in first_guess_params or 'beta_dust' in fixed_params, "First guess parameters must contain 'beta_dust'."
+        params_list.append('temp_dust')
+        params_list.append('beta_dust')
+    if 'synchrotron' in components_list:
+        assert 'beta_pl' in first_guess_params or 'beta_pl' in fixed_params, "First guess parameters must contain 'beta_pl'."
+        params_list.append('beta_pl')
     assert isinstance(sky_map, (Stokes, ArrayLike)), "Sky map must be a Stokes object or a ndarray."
 
     assert (use_preconditioner_diag != use_preconditioner_pinv) or (use_preconditioner_pinv == False), "Only one type of preconditioner (use_preconditioner_diag or use_preconditioner_pinv) can be used at a time."
     assert (use_preconditioner_pinv == (matrix_precond is not None)), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
-    
+    print('minimization tol : ', dictionary_parameters_minimization['tol'])
+    print('CG tol : ',  dictionary_parameters_CG['tol_CG'])
     if dictionary_parameters_minimization['tol'] < dictionary_parameters_CG['tol_CG'] and do_minimization:
         print("Warning: The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
 
@@ -374,7 +382,7 @@ def perform_compsep(
         
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
         
-    number_components = 3 # CMB, dust, synchrotron
+    number_components = len(components_list)#3 # CMB, dust, synchrotron
     n_pix = pixels_to_retain_nested.size
 
     def get_A_s_AOND(params, right_member=ONd):
@@ -387,11 +395,13 @@ def perform_compsep(
         for param_name in ['temp_dust', 'beta_dust', 'beta_pl']:
             if param_name in params:
                 parameters_dict[param_name] = params[param_name]
-            else:
+            elif param_name in params_list:
                 parameters_dict[param_name] = fixed_params[param_name]
 
         # Mixing matrix operator
-        A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
+        A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
+                                        dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, 
+                                        patch_indices=patch_indices, components_list=components_list)
 
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
@@ -459,7 +469,7 @@ def perform_compsep(
         for param_name in ['temp_dust', 'beta_dust', 'beta_pl']:
             if param_name in params:
                 parameters_dict[param_name] = params[param_name]
-            else:
+            elif param_name in params_list:
                 parameters_dict[param_name] = fixed_params[param_name]
 
         _, map_s, AOND, _ = get_A_s_AOND(parameters_dict)
@@ -482,7 +492,7 @@ def perform_compsep(
         for param_name in ['temp_dust', 'beta_dust', 'beta_pl']:
             if param_name in params:
                 parameters_dict[param_name] = params[param_name]
-            else:
+            elif param_name in params_list:
                 parameters_dict[param_name] = fixed_params[param_name]
 
         A, map_s, AOND, _ = get_A_s_AOND(parameters_dict)
@@ -509,12 +519,15 @@ def perform_compsep(
 
     if do_minimization:
         print("Launching minimization!!", flush=True)
+        print("WARNING: FIXING SOLVER TO scipy_tnc")
+        print('tol minimization:', dictionary_parameters_minimization['tol'])
         output_params, output_state = minimize(
             init_params=first_guess_params, 
             fn=spectral_likelihood_custom_gradient, 
             max_iter=dictionary_parameters_minimization['max_iter'], 
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
+            solver_name='scipy_tnc',
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         number_iterations = output_state.iter_num
