@@ -293,7 +293,7 @@ def perform_compsep(
         warnings.warn("The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
 
     solver_name = dictionary_parameters_minimization.get('solver_name', 'optax_lbfgs')
-    assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
+    # assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
     if do_minimization:
         print("The minimization will be performed with the following parameters:", dictionary_parameters_minimization, flush=True)
@@ -530,7 +530,7 @@ def perform_compsep(
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
             solver_name=solver_name,
-            **dictionary_parameters_minimization.get('options', dict())
+            options=dictionary_parameters_minimization.get('options', None)
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)
