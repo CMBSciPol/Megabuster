@@ -33,8 +33,7 @@ f.close()
 
 dictionary_path_inputs = dictionary_parameters['path_inputs']
 
-path_output = dictionary_path_inputs['path_output'] 
-
+path_precomputations = dictionary_path_inputs['path_precomputations']
 
 path_nhits = dictionary_path_inputs['path_nhits']
 # The nhits is used to build the analysis mask (here without inhomogeneities), which must be compatible with the observation matrices 
@@ -64,12 +63,12 @@ all_path_save_obsmat_file = [
 
 # Preparing output paths
 
-path_eigen_decomp_fname = [path_output + path.replace('healpix', 'egeinvalue_precomputations.npz') for path in all_incomplete_path_save_obsmat_file]
+path_eigen_decomp_fname = [path_precomputations + path.replace('healpix', 'egeinvalue_precomputations.npz') for path in all_incomplete_path_save_obsmat_file]
 
-list_obsmat_operator_fname = [path_output + path + '_masked' for path in all_incomplete_path_save_obsmat_file]
+list_obsmat_operator_fname = [path_precomputations + path + '_masked' for path in all_incomplete_path_save_obsmat_file]
 
 all_path_save_obsmat_file_masked = [
-    path_output + path + '_masked' for path in all_incomplete_path_save_obsmat_file
+    path_precomputations + path + '_masked' for path in all_incomplete_path_save_obsmat_file
 ]
 
 
@@ -163,7 +162,7 @@ for path in tqdm(all_path_save_obsmat_file): #[:2]
 
     print(path_input_MSS2_obsmat+path)
     filename_only = path.split("/")[-1]
-    fname_output = path_output + filename_only + "_masked.npz"
+    fname_output = path_precomputations + filename_only + "_masked.npz"
     print(fname_output)
 
     if os.path.exists(fname_output):
