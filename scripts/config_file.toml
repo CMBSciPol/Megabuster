@@ -26,8 +26,6 @@ filter_noise = true
 
 [path_inputs]
 
-path_input_MSS2_obsmat = "/cephfs/soukdata/user_data/jost/MEGATOP/Obsmat/OBSMAT_TO_SOUK/MSS2/"
-
 path_directory_input_MSS2_obsmat = "/cephfs/soukdata/user_data/jost/MEGATOP/Obsmat/OBSMAT_TO_SOUK/MSS2/"
 
 path_nhits = "/cephfs/soukdata/user_data/jost/MEGATOP/Obsmat/OBSMAT_TO_SOUK/MSS2/sobs_RC1.r01_SAT4_mission_f030_4way_coadd_sky_ivar_healpix.fits"
