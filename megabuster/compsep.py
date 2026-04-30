@@ -442,7 +442,7 @@ def perform_compsep(
                 )
             )
 
-            pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
+            pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed, components_list)
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
 
         diagonal_central_term = (A.T @ central_freq_op @ A).I(
@@ -505,7 +505,8 @@ def perform_compsep(
             in_structure_sed, 
             dust_nu0=dust_nu0, 
             synchrotron_nu0=synchrotron_nu0, 
-            patch_indices=patch_indices
+            patch_indices=patch_indices,
+            components_list=components_list
         )
 
         left_hand_term = ONd - (central_freq_op @ A)(map_s)

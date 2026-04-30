@@ -116,13 +116,13 @@ def get_dense_furax_operator_from_freq_array(matrix):
     list_QU_operators = [ops_Q, ops_U]
     return BlockColumnOperator(StokesQU(*list_QU_operators))
 
-def get_A_from_array(matrix_A, in_structure_sed):
+def get_A_from_array(matrix_A, in_structure_sed, component_list=['cmb', 'dust', 'synchrotron']):
     if matrix_A.ndim == 2:
         matrix_to_build = matrix_A[..., None]
     else:
         matrix_to_build = matrix_A
     return BlockRowOperator(
-        {component:BroadcastDiagonalOperator(matrix_to_build[num_cpt,...],in_structure=in_structure_sed,) for num_cpt, component in enumerate(['cmb', 'dust', 'synchrotron'])}
+        {component:BroadcastDiagonalOperator(matrix_to_build[num_cpt,...],in_structure=in_structure_sed,) for num_cpt, component in enumerate(component_list)}
     )
 
 def get_healpix_indices_patch_from_mask(mask, nside_patches, nest=False):

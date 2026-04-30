@@ -45,11 +45,14 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
     """
     if patch_indices is None:
         patch_indices = single_patch_indices
+    
+    kwargs_comps={}
 
     if 'cmb' in components_list:
         cmb = CMBOperator(frequencies, in_structure=in_structure_sed)
-    else:
-        cmb = None
+        kwargs_comps['cmb']=cmb
+    # else:
+    #     cmb = None
     if 'dust' in components_list:
         dust = DustOperator(
             frequencies,
@@ -60,8 +63,9 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
             beta_patch_indices=patch_indices['beta_dust_patches'],
             in_structure=in_structure_sed
         )
-    else:
-        dust = None
+        kwargs_comps['dust']=dust
+    # else:
+    #     dust = None
     if 'synchrotron' in components_list:
         synchrotron = SynchrotronOperator(
             frequencies, 
@@ -70,13 +74,16 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
             beta_pl_patch_indices=patch_indices['beta_pl_patches'],
             in_structure=in_structure_sed
         )
-    else:
-        synchrotron = None        
+        kwargs_comps['synchrotron']=synchrotron
+    # else:
+    #     synchrotron = None        
 
     # Mixing matrix operator
-    return MixingMatrixOperator(cmb=cmb, dust=dust, synchrotron=synchrotron)
+    # import IPython; IPython.embed()
+    # return MixingMatrixOperator(cmb=cmb, dust=dust, synchrotron=synchrotron)
+    return MixingMatrixOperator(**kwargs_comps)
 
-def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
+def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None, components_list=['cmb','dust','synchrotron']):
     """
     Create a MixingMatrixOperator object using the provided parameters.
 
@@ -104,27 +111,38 @@ def create_MixingMatrixOperator_deriv(frequencies, parameters_dict, in_structure
     if patch_indices is None:
         patch_indices = single_patch_indices
 
-    cmb_derivative = CMBDerivOperator(frequencies, in_structure=in_structure_sed)
-    dust_derivative = DustDerivOperator(
-        frequencies,
-        frequency0=dust_nu0,
-        temperature=parameters_dict['temp_dust'],
-        beta=parameters_dict['beta_dust'],
-        temperature_patch_indices=patch_indices['temp_dust_patches'],
-        beta_patch_indices=patch_indices['beta_dust_patches'],
-        in_structure=in_structure_sed,
-    )
-    synchrotron_derivative = SynchrotronDerivOperator(
-        frequencies, 
-        frequency0=synchrotron_nu0, 
-        beta_pl=parameters_dict['beta_pl'], 
-        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
-        in_structure=in_structure_sed
-    )
+    kwargs_comps_deriv = {}
+    if 'cmb' in components_list:
+        cmb_derivative = CMBDerivOperator(frequencies, in_structure=in_structure_sed)
+        kwargs_comps_deriv['cmb'] = cmb_derivative
+    if 'dust' in components_list:
+        dust_derivative = DustDerivOperator(
+            frequencies,
+            frequency0=dust_nu0,
+            temperature=parameters_dict['temp_dust'],
+            beta=parameters_dict['beta_dust'],
+            temperature_patch_indices=patch_indices['temp_dust_patches'],
+            beta_patch_indices=patch_indices['beta_dust_patches'],
+            in_structure=in_structure_sed,
+        )
+        kwargs_comps_deriv['dust'] = dust_derivative
+    if 'synchrotron' in components_list:
+        synchrotron_derivative = SynchrotronDerivOperator(
+            frequencies, 
+            frequency0=synchrotron_nu0, 
+            beta_pl=parameters_dict['beta_pl'], 
+            beta_pl_patch_indices=patch_indices['beta_pl_patches'],
+            in_structure=in_structure_sed
+        )
+        kwargs_comps_deriv['synchrotron'] = synchrotron_derivative
+
 
     # Mixing matrix operator
-    return {'beta_dust':MixingMatrixOperator(cmb=cmb_derivative, dust=dust_derivative, synchrotron=cmb_derivative),
-            'beta_pl':MixingMatrixOperator(cmb=cmb_derivative, dust=cmb_derivative, synchrotron=synchrotron_derivative)}
+    if 'synchrotron' in components_list:
+        return {'beta_dust':MixingMatrixOperator(**kwargs_comps_deriv),
+                'beta_pl':MixingMatrixOperator(**kwargs_comps_deriv)}
+
+    return {'beta_dust':MixingMatrixOperator(**kwargs_comps_deriv)}
 
 
 
