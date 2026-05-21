@@ -6,6 +6,7 @@ from jaxtyping import ArrayLike
 
 from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator, BlockRowOperator, BroadcastDiagonalOperator, DenseBlockDiagonalOperator
 from furax.obs.stokes import StokesQU
+from furax import AbstractLinearOperator
 
 __all__ = [
     'get_maps_from_Stokes',
@@ -84,6 +85,50 @@ def get_preconditioner(preconditioner_matrix, in_structure):
             component_1: BlockDiagonalOperator(
                 get_diagonal_operator_from_stokes_maps(
                     preconditioner_matrix[num_cpt_0, num_cpt_1, :, :],
+                    in_structure
+                )
+            ) for num_cpt_1, component_1 in enumerate(['cmb', 'dust', 'synchrotron'])
+        }) for num_cpt_0, component_0 in enumerate(['cmb', 'dust', 'synchrotron'])
+    })
+
+class StokesLinearOperator(AbstractLinearOperator):
+    stokes_maps: jnp.ndarray
+
+    def mv(self, x):
+        #print('self.stokes_maps[:, :, 0]:', self.stokes_maps[:, :, 0])
+        q = self.stokes_maps[0, 0] * x.q + self.stokes_maps[0, 1] * x.u
+        u = self.stokes_maps[1, 0] * x.q + self.stokes_maps[1, 1] * x.u
+        return StokesQU(q, u)
+
+def get_diagonal_operator_from_stokes_maps2(stokes_maps, in_structure):
+    assert stokes_maps.shape[0] == 2 and stokes_maps.shape[1] == 2
+    return StokesLinearOperator(stokes_maps=stokes_maps, in_structure=in_structure)
+    
+def get_preconditioner2(preconditioner_matrix, in_structure):
+    """
+    Given a preconditioner matrix in terms of components, return a BlockColumnOperator that
+    applies the preconditioner to a StokesQU object.
+    
+    in_structure must be as_structure(AOND['cmb'].q)
+
+    Parameters
+    ----------
+    preconditioner_matrix : np.ndarray
+        The preconditioner matrix in terms of components.
+    in_structure : ShapeDtypeStruct
+        The structure of the StokesQU object.
+
+    Returns
+    -------
+    BlockColumnOperator
+        The preconditioner as a BlockColumnOperator expressed with Pytrees using dictionaries of {'cmb', 'dust', 'synchrotron'}.
+    """
+
+    return BlockColumnOperator({
+        component_0: BlockRowOperator({
+            component_1: BlockDiagonalOperator(
+                get_diagonal_operator_from_stokes_maps2(
+                    preconditioner_matrix[num_cpt_0, num_cpt_1, :, :, :],  # (n_stokes, n_stokes, n_pix),
                     in_structure
                 )
             ) for num_cpt_1, component_1 in enumerate(['cmb', 'dust', 'synchrotron'])

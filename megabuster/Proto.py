@@ -9,11 +9,34 @@ import lineax as lx
 import healpy as hp
 import jax.scipy.stats as stats
 import blackjax
+import matplotlib
+matplotlib.use('Agg')  # AVANT tout le reste
+# Prefer not to require an external LaTeX installation by default.
+# Some environments or user rc files may enable text.usetex; to avoid
+# hard crashes when 'latex' isn't available, ensure savefig will
+# gracefully fall back to mathtext by disabling usetex at save time
+# if the latex executable cannot be found.
+matplotlib.rcParams['text.usetex'] = False
+matplotlib.rcParams['mathtext.fontset'] = 'dejavusans'
 import matplotlib.pyplot as plt
 import corner
-import arviz as az
-
 from getdist import MCSamples, plots
+
+# Monkeypatch Figure.savefig to auto-disable usetex when latex is missing.
+try:
+    _orig_savefig = matplotlib.figure.Figure.savefig
+
+    def _safe_savefig(self, *args, **kwargs):
+        if matplotlib.rcParams.get('text.usetex', False) and shutil.which('latex') is None:
+            warnings.warn("Matplotlib configured to use LaTeX but 'latex' not found in PATH. Disabling text.usetex for this save.")
+            matplotlib.rcParams['text.usetex'] = False
+        return _orig_savefig(self, *args, **kwargs)
+
+    matplotlib.figure.Figure.savefig = _safe_savefig
+except Exception:
+    # If monkeypatching fails for any reason, don't break the module import.
+    pass
+import matplotlib.pyplot as plt
 from jaxtyping import ArrayLike
 from typing import Callable
 
@@ -65,9 +88,6 @@ class Results(object):
     message: str
     W_params: Callable = None # Function to apply the mixing matrix operator at the parameters fitted
     Cov: ArrayLike = None # Covariance matrix of the parameters fitted, if available
-    params_names: list = None # Params_names
-    #mean_cov: list = None # Mean values of estimated parameters
-    mc_samples = None # Results samples from HMC
     def __init__(self):
         self.params = None
         self.x = None
@@ -78,8 +98,6 @@ class Results(object):
         self.message = "No optimization performed yet."
         self.W_params = None
         self.Cov = None
-        self.params_names = None
-        self.mc_samples = None
 
     @classmethod
     def from_compsep_results(
@@ -94,9 +112,7 @@ class Results(object):
         ordering_parameter=['beta_dust', 'beta_pl'], 
         ordering_component=['cmb', 'dust', 'synchrotron'],
         W_params=None,
-        Cov=None,
-        params_names = None,
-        mc_samples = None,
+        Cov=None
 ):
         """
         Create an instance of Results from the component separation results.
@@ -114,7 +130,7 @@ class Results(object):
         """
         res = cls()
         res.params = name_params
-        res.x = np.array([final_params[key] for key in name_params])
+        res.x = np.array([final_params[key] for key in ordering_parameter])
 
         def final_W(input_maps):
             """
@@ -156,8 +172,6 @@ class Results(object):
         res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
         res.W_params = final_W_params
         res.Cov = Cov
-        res.params_names = params_names
-        res.mc_samples = mc_samples
         return res
 
 def dot_2(x,y):
@@ -182,7 +196,7 @@ def dot_2(x,y):
     
 
 def perform_compsep(
-    config,
+    onfig,
     manager,
     first_guess_params, 
     sky_map, 
@@ -195,7 +209,6 @@ def perform_compsep(
     synchrotron_nu0=20.0,
     central_freq_op=None,
     use_calibration_matrix=True,
-    use_obsmat=False,
     angles_prior_dict=None,
     angles_names=None,
     obs_mat_operator=None, 
@@ -204,19 +217,14 @@ def perform_compsep(
     use_preconditioner_diag=False,
     use_preconditioner_pinv=False,
     matrix_precond=None,
-    solver_name="ADABK0",
-    #solver_name="scipy_tnc",
+    #solver_name="ADABK0",
+    solver_name="scipy_tnc",
     #solver_name="optax_lbfgs",
     dictionary_parameters_minimization: dict={'max_iter':1, 'tol':1e-5},
     dictionary_parameters_CG: dict={'max_steps_CG':400, 'tol_CG':1e-6},
     ordering_parameter=['beta_dust', 'beta_pl'], 
     ordering_component=['cmb', 'dust', 'synchrotron'],
-    patch_indices=None,
-    use_hessienne = False,
-    use_hmc = False,
-    n_warm = 300,
-    n_samples = 10000,
-    is_noise_map = False,
+    patch_indices=None
     ):
     """
     Perform component separation using the given parameters and data.
@@ -357,7 +365,7 @@ def perform_compsep(
     
     for i in range(invN_matrix.shape[0]):
         invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)[..., pixels_to_retain_nested]
-        # If noiseless tests create identity noise matrix divided by a factor 100:
+        # Si identiy:
         #ones_matrix = np.ones(invN_matrix.shape[1:])/100  # shape (n_stokes, n_pixels)
         #invN_matrix_nested[i] = hp.reorder(ones_matrix, r2n=True)[..., pixels_to_retain_nested]
 
@@ -384,30 +392,35 @@ def perform_compsep(
 
     invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, in_structure_noise_cov)
     
-    #Noiseless case for tests:
+    #print(type(invN))
+    #print(type(invN.block_leaves))
+    #print([type(x) for x in invN.block_leaves])
+    #print(invN.block_leaves[0]._diagonal.shape)
     #invN = IdentityOperator(in_structure=invN2.in_structure)
+    #print('invN:', invN)
 
-    # create miscalibration dict
-    angles_dict = {}
+    # Safe defaults to avoid NameError when angle-related options are not provided
+    if angles_names is None:
+        angles_names = []
+    # priors_dict / first_angles_list / prior_list are populated only if angles_prior_dict is set
     priors_dict = {}
     first_angles_list = []
     prior_list = []
 
-    angles = angles_prior_dict.pop('angle_central_value')
-    first_angles_list = []
-    for i, angle in enumerate(angles):
-        angles_dict[f'angle_{i}'] = angle
-        first_angles_list.append(angle)
-    angles_prior = angles_prior_dict.pop('angle_uncertainty')
-    prior_list = []
-    for i, prior in enumerate(angles_prior):
-        priors_dict[f'angle_{i}'] = prior
-        prior_list.append(prior)
-    first_guess_params = {**first_guess_params,**angles_dict}
-    angles_names = [f'angle_{i}' for i in range(len(angles))]
+    #Calibration matrix operator
+    if use_calibration_matrix:
+        print('Using Calibration_matrix ...')
+    # Prepare the observation matrix operator
+    else:
+        if obs_mat_operator is None:
+            obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
+        
+        if obsmat_operator_rhs is None:
+            obsmat_operator_rhs = obs_mat_operator.T
+        
+        if central_freq_op is None:
+            central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
 
-    if use_obsmat:
-        # Prepare the observation matrix operator
         # Precompute part of the right-hand side of the CG equation
         print("Precomputing the right-hand side of the CG equation . . .", flush=True)
         ONd = obsmat_operator_rhs(invN(sky_map))
@@ -438,6 +451,25 @@ def perform_compsep(
     number_components = 3 # CMB, dust, synchrotron
     n_pix = pixels_to_retain_nested.size
 
+    if angles_prior_dict is not None:
+        # map the incoming key "central value" to the expected "central_value" parameter
+        angles_dict = {}
+        priors_dict = {}
+        angles = angles_prior_dict.pop('angle_central_value')
+        first_angles_list = []
+        for i, angle in enumerate(angles):
+            angles_dict[f'angle_{i}'] = angle
+            first_angles_list.append(angle)
+        angles_prior = angles_prior_dict.pop('angle_uncertainty')
+        prior_list = []
+        for i, prior in enumerate(angles_prior):
+            priors_dict[f'angle_{i}'] = prior
+            prior_list.append(prior)
+        first_guess_params = {**first_guess_params,**angles_dict}
+        angles_names = [f'angle_{i}' for i in range(len(angles))]
+    else:
+        first_guess_params = {**first_guess_params}
+
     def build_preconditioner(invN, matrix_A, angles_jnp, Op):
         """
         Build a diagonal preconditioner for Op = A.T @ C.T @ invN @ C @ A.
@@ -462,23 +494,45 @@ def perform_compsep(
         preconditioner : BlockColumnOperator
             Diagonal preconditioner operator ready to pass to CG.
         """
-
         # 1. Extraire la diagonale de invN
-        invN_Q = invN.block_leaves[0]._diagonal
-        invN_U = invN.block_leaves[1]._diagonal
+        invN_Q = invN.block_leaves[0]._diagonal  # (n_freq, n_pix)
+        invN_U = invN.block_leaves[1]._diagonal  # (n_freq, n_pix)
 
         # 2. Calcul de C.T @ invN @ C
-        cos_2a = jnp.cos(2 * angles_jnp).reshape(-1, 1)
-        sin_2a = jnp.sin(2 * angles_jnp).reshape(-1, 1)
+        cos_2a = jnp.cos(2 * angles_jnp).reshape(-1, 1)  # (n_freq, 1) garanti
+        sin_2a = jnp.sin(2 * angles_jnp).reshape(-1, 1)  # (n_freq, 1) garanti
 
-        CtinvNC_QQ = cos_2a**2 * invN_Q + sin_2a**2 * invN_U
-        CtinvNC_UU = sin_2a**2 * invN_Q + cos_2a**2 * invN_U
+        CtinvNC_QQ = cos_2a**2 * invN_Q + sin_2a**2 * invN_U  # (n_freq, n_pix)
+        CtinvNC_UU = sin_2a**2 * invN_Q + cos_2a**2 * invN_U  # (n_freq, n_pix)
         CtinvNC_QU = cos_2a * sin_2a * (invN_U - invN_Q)
 
         CtinvNC = jnp.stack([
         jnp.stack([CtinvNC_QQ, CtinvNC_QU], axis=1),
         jnp.stack([CtinvNC_QU, CtinvNC_UU], axis=1),
         ], axis=1)
+
+        #matrix = jnp.einsum('fcp, fsjp, fkp -> cksjp', matrix_A, CtinvNC, matrix_A)
+        # (n_comp, n_comp, n_stokes, n_stokes, n_pix)
+        #print('matrix.shape', matrix.shape)
+        #print('matrix[: , :, 0, 0, 0]:', matrix[: , :, 0, 0, 0])
+        #matrix_moved = jnp.moveaxis(matrix, [0,1], [-2,-1])
+        # (n_stokes, n_stokes, n_pix, n_comp, n_comp)
+        #print('matrix.shape', matrix.shape)
+        #print('matrix_moved.shape', matrix_moved.shape)
+        #preconditioner_matrix = jnp.linalg.pinv(matrix_moved)
+        #print('inv matrix[0, 0, 0, :, :]:', preconditioner_matrix[0, 0, 0, :, :])
+        #print('preconditioner_matrix.shape pre', preconditioner_matrix.shape)
+        # (n_stokes, n_stokes, n_pix, n_comp, n_comp)
+        #preconditioner_matrix = jnp.moveaxis(preconditioner_matrix, [0,1,2,3,4], [2,3,4,0,1])
+        #print('preconditioner_matrix.shape post', preconditioner_matrix.shape)
+        # (n_comp, n_comp, n_stokes, n_stokes, n_pix)
+
+        #print('inverse ', matrix_moved[0, 0, 0, :, :] @ preconditioner_matrix[0, 0, :, :, 0])
+
+        #print('preconditioner_matrix[0, 0, :, :, 0]', preconditioner_matrix[0, 0, :, :, 0])
+        #print('preconditioner_matrix.shape',preconditioner_matrix.shape)
+
+        ####
 
         matrix = jnp.einsum('fcp, fsjp, fkp -> cksjp', matrix_A, CtinvNC, matrix_A)
         # (n_comp, n_comp, n_stokes, n_stokes, n_pix)
@@ -493,12 +547,13 @@ def perform_compsep(
         preconditioner_matrix = inv_matrix_2d.reshape(n_pix, n_comp, n_stokes, n_comp, n_stokes).transpose(1, 3, 2, 4, 0)
         # (n_comp, n_comp, n_stokes, n_stokes, n_pix)
 
+
         # 4. Construire l'opérateur Furax
         return get_preconditioner2(
             preconditioner_matrix,
             in_structure=as_structure(Op.in_structure['cmb'])
         )
- 
+
     # @equinox.filter_jit
     def get_A_s_AOND(params):
         """
@@ -509,32 +564,23 @@ def perform_compsep(
         parameters_dict = dict()
         for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
             if param_name in params:
-                if param_name in angles_names:
-                    if not use_calibration_matrix:
-                        parameters_dict[param_name] = 0.0
-                    else:
-                        parameters_dict[param_name] = params[param_name]
-                else:
-                    parameters_dict[param_name] = params[param_name]
+                parameters_dict[param_name] = params[param_name]
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        if use_calibration_matrix:
+        if angles_prior_dict is not None:
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])[:, None]
+            #angles_jnp = jnp.zeros(6)[:, None]
+            #print('angles_jnp:', angles_jnp)
             C = build_calibration_operator(-angles_jnp, vect_shape)
+            #C = IdentityOperator(in_structure=invN.in_structure)
             operator_rhs = C.T
             c_right_member = invN(sky_map)
             right_member = operator_rhs(c_right_member) # Op ?
             c_central_freq_op = invN @ C
+            #central_freq_op = invN
             central_freq_op = C.T @ invN @ C
-        elif not use_obsmat:
-            C = IdentityOperator(in_structure=invN.in_structure)
-            operator_rhs = C
-            c_right_member = invN(sky_map)
-            right_member = c_right_member # Op ?
-            c_central_freq_op = invN
-            central_freq_op = invN
 
         # Mixing matrix operator
         A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
@@ -542,82 +588,54 @@ def perform_compsep(
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
 
-        ## Calculate preconditioners :
         preconditioner = None
 
-        if use_obsmat:
-            c_right_member = None
-            c_central_freq_op = None
-            if use_preconditioner_diag:
-                print("Using diagonal preconditioner")
-                matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-                for component in range(number_components):
-                    matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-                
-                # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
-                preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fcp,fsp,fkp->psck', matrix_A, central_matrix_precond, matrix_A)).T)
+        # Build the full operator (used downstream) but also build a
+        # cheap diagonal preconditioner approximating diag(Op).
+        Op = A.T @ central_freq_op @ A
+        #diag = Op.as_matrix().diagonal()  # si matérialisable localement
+        # ou si tu ne peux pas matérialiser :
+        #diag = jnp.array([op.mv(jnp.eye(n)[i])[i] for i in range(n)])  # coûteux mais one-shot
 
-                # Prepare the preconditioner operator
-                preconditioner = get_preconditioner(
-                    preconditioner_matrix, 
-                    in_structure=as_structure(AOND['cmb'].q)
-                )
-        if use_preconditioner_pinv:
-            print("Using pseudo-inverse preconditioner")
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for component in range(number_components):
-                matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-            
-            if patch_indices is None:
-                print("Assuming no patches for the preconditioner computation")
-                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
-            else:
-                print("Assuming patches for the preconditioner computation")
-                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
+        # Construction de matrix_A
+        matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
+        for i, component in enumerate(A.block_leaves):
+            matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
 
-            pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
-                    '...ba,...b,...cb->...ac', 
-                    matrix_vh, 
-                    jnp.where(matrix_s!=0, 1./matrix_s, 0.),
-                    matrix_u,
-                )
-            )
+        # Préconditionneur
+        #preconditioner = build_preconditioner(invN, matrix_A, angles_jnp, Op)
+        #preconditioner = IdentityOperator(in_structure=Op.in_structure)
+        #print("Preconditioner built!")
+        #print("Op.in_structure:", Op.in_structure)
+        #print("preconditioner.in_structure:", preconditioner.in_structure)
 
-            pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
-            preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
+        # Préconditionneur diagonal
+        #preconditioner = lx.DiagonalLinearOperator(1.0 / diag)
 
-        diagonal_central_term = (A.T @ central_freq_op @ A).I(
-            solver=lx.CG(
-                rtol=dictionary_parameters_CG['tol_CG'], 
-                atol=dictionary_parameters_CG['tol_CG'], 
-                max_steps=dictionary_parameters_CG['max_steps_CG']
-            ), 
-            preconditioner=preconditioner,
-            callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
-        )
+        #dictionary_parameters_CG['max_steps_CG'] = 5000
 
-        if use_calibration_matrix:
-            Op = A.T @ central_freq_op @ A
+        #print('max_steps', dictionary_parameters_CG['max_steps_CG'])
 
-            # Construction de matrix_A
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for i, component in enumerate(A.block_leaves):
-                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
-            
-            diagonal_central_term = build_preconditioner(invN, matrix_A, angles_jnp, Op)
-            first_central_term = diagonal_central_term(AOND)
 
-        elif not use_obsmat:
-            diagonal_central_term = (A.T @ central_freq_op @ A).I(
-                solver=lx.CG(
-                    rtol=dictionary_parameters_CG['tol_CG'], 
-                    atol=dictionary_parameters_CG['tol_CG'], 
-                    max_steps=dictionary_parameters_CG['max_steps_CG']
-                ), 
-                preconditioner=preconditioner,
-                callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
-            )
-            first_central_term = diagonal_central_term(AOND)
+        #diagonal_central_term = (A.T @ central_freq_op @ A).I(
+        #    solver=lx.GMRES(
+        #        rtol=dictionary_parameters_CG['tol_CG'], 
+        #        atol=dictionary_parameters_CG['tol_CG'], 
+        #        max_steps=dictionary_parameters_CG['max_steps_CG']
+        #    ), 
+        #    preconditioner=preconditioner,
+        #    callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
+        #)
+
+        diagonal_central_term = build_preconditioner(invN, matrix_A, angles_jnp, Op)
+
+        #Id = Op @ diagonal_central_term
+        #res = AOND['cmb'] - Id(AOND)['cmb']
+        #print('res',res[1])
+        result = Op(diagonal_central_term(AOND))
+        #print('cmb q diff:', (result['cmb'].q - AOND['cmb'].q).max())
+        #print('cmb u diff:', (result['cmb'].u - AOND['cmb'].u).max())
+        first_central_term = diagonal_central_term(AOND)
 
         return A, first_central_term, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term
 
@@ -627,115 +645,7 @@ def perform_compsep(
             Compute the log-proba given a set of parameters 
         """
 
-        # Select parameters which are to be estimated 
-        parameters_dict = dict()
-        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
-            if param_name in params:
-                if param_name in angles_names:
-                    if not use_calibration_matrix:
-                        parameters_dict[param_name] = 0.0
-                    else:
-                        parameters_dict[param_name] = params[param_name]
-                else:
-                    parameters_dict[param_name] = params[param_name]
-            else:
-                parameters_dict[param_name] = fixed_params[param_name]
-
-        _, map_s, AOND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
-
-        if use_calibration_matrix:
-            n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
-            angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
-            first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
-            angles_diff = angles_jnp - first_angles_jnp
-            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
-            logL = -dot_2(AOND, map_s) + term2
-        else:
-            logL = -dot_2(AOND, map_s)
-
-        return logL
-
-    @spectral_likelihood_custom_gradient.def_jvp
-    def custom_gradient(primals, tangents):
-        """
-        Custom JVP rule for the perturbative_negative_log_prob function.
-        """
-        params, = primals
-        beta_tau, = tangents
-
-        # Select parameters which are to be estimated 
-        parameters_dict = dict()
-        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
-            if param_name in params:
-                if param_name in angles_names:
-                    if not use_calibration_matrix:
-                        parameters_dict[param_name] = 0.0
-                    else:
-                        parameters_dict[param_name] = params[param_name]
-                else:
-                    parameters_dict[param_name] = params[param_name]
-            else:
-                parameters_dict[param_name] = fixed_params[param_name]
-
-        A, map_s, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ = get_A_s_AOND(parameters_dict)
-
-        if use_calibration_matrix:
-            n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
-            angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
-            first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
-            angles_diff = angles_jnp - first_angles_jnp
-            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
-            logL = -dot_2(AOND, map_s) + term2
-        else:
-            logL = -dot_2(AOND, map_s)
-
-        A_deriv = create_MixingMatrixOperator_deriv(
-            frequencies, 
-            parameters_dict, 
-            in_structure_sed, 
-            dust_nu0=dust_nu0, 
-            synchrotron_nu0=synchrotron_nu0, 
-            patch_indices=patch_indices
-        )
-
-        keys_params = params.keys()
-        final_grad_log = 0
-
-        if use_calibration_matrix:
-            c_left_hand_term = c_right_member - (c_central_freq_op @ A)(map_s)
-            left_hand_term = right_member - (central_freq_op @ A)(map_s)
-            Ax = A(map_s)
-            for key in keys_params:
-                if key.startswith("angle"):  # si le paramètre est un angle de calibration
-                    # On récupère l'index du bloc correspondant à cet angle
-                    # tu peux construire ce dict angle->index avant
-                    # Rotation infinitésimale via l'astuce +pi/4 en faisant attention l'operateur R(θ)
-                    # est définit par une rotation de -θ
-                    i = int(key.split("_")[1])
-                    Ax_idx = Ax[i,:]
-                    X_op = QURotationOperator.create(shape=Ax_idx.q.shape, stokes="QU", angles=-angles_jnp[i] - jnp.pi/4)
-                    dXAx = 2 * X_op(Ax_idx)
-                    grad_cal = -2*dot_2(dXAx, c_left_hand_term[i, :])
-                    if priors_dict[key] != 0:
-                        grad_prior = 2 * angles_diff[i] / priors_dict[key]**2
-                    else:
-                        grad_prior = 0
-                    final_grad_log += (grad_cal + grad_prior)* beta_tau[key]
-                else:
-                    final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
-        else:
-            left_hand_term = ONd - (central_freq_op @ A)(map_s)
-            for key in keys_params:
-                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
-
-        return logL, final_grad_log
-
-    def spectral_likelihood(params):
-        """
-            Compute the log-proba given a set of parameters 
-        """
+        #jax.debug.print("params = {}", params)
 
         # Select parameters which are to be estimated 
         parameters_dict = dict()
@@ -758,61 +668,244 @@ def perform_compsep(
             term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
             logL = -dot_2(AOND, map_s) + term2
 
+        #Npix = -786432
         Npix = 1
 
         # Compute the negative log-likelihood
-        return logL/Npix
+        return logL/Npix #Positive log-likelihood for hmc
+
+    @spectral_likelihood_custom_gradient.def_jvp
+    def custom_gradient(primals, tangents):
+        """
+        Custom JVP rule for the perturbative_negative_log_prob function.
+        """
+        params, = primals
+        beta_tau, = tangents
+
+        #jax.debug.print("params = {}", params)
+
+        # Select parameters which are to be estimated 
+        parameters_dict = dict()
+        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
+            if param_name in params:
+                parameters_dict[param_name] = params[param_name]
+            else:
+                parameters_dict[param_name] = fixed_params[param_name]
+
+        A, map_s, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ = get_A_s_AOND(parameters_dict)
+
+        if angles_prior_dict is None:
+            logL = -dot_2(AOND, map_s)
+        else:
+            n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
+            angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
+            first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
+            prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
+            angles_diff = angles_jnp - first_angles_jnp
+            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
+            logL = -dot_2(AOND, map_s) + term2
+
+        A_deriv = create_MixingMatrixOperator_deriv(
+            frequencies, 
+            parameters_dict, 
+            in_structure_sed, 
+            dust_nu0=dust_nu0, 
+            synchrotron_nu0=synchrotron_nu0, 
+            patch_indices=patch_indices
+        )
+
+        c_left_hand_term = c_right_member - (c_central_freq_op @ A)(map_s)
+        left_hand_term = right_member - (central_freq_op @ A)(map_s)
+
+        keys_params = params.keys()
+
+        final_grad_log = 0
+        Ax = A(map_s)
+        for key in keys_params:
+            if key.startswith("angle"):  # si le paramètre est un angle de calibration
+                # On récupère l'index du bloc correspondant à cet angle
+                # tu peux construire ce dict angle->index avant
+                # Rotation infinitésimale via l'astuce +pi/4
+                #X_shift = QURotationOperator.create(
+                #    shape=Ax.q[i,:].shape,
+                #    stokes="QU",
+                #    angles=angles_jnp[i] + jnp.pi / 4
+                #)
+                i = int(key.split("_")[1])
+                Ax_idx = Ax[i,:]
+                #J_Ax = Stokes.from_stokes(Q = -Ax_idx.u, U = Ax_idx.q)
+                #X_op = QURotationOperator.create(shape=Ax_idx.q.shape, stokes="QU", angles=angles_jnp[i])
+                #dXAx = -2 * X_op(J_Ax)
+                X_op = QURotationOperator.create(shape=Ax_idx.q.shape, stokes="QU", angles=-angles_jnp[i] - jnp.pi/4)
+                dXAx = 2 * X_op(Ax_idx)
+                #C_i_Ax = X_op(Ax_idx)
+                #dXAx = 2 * Stokes.from_stokes(Q=-C_i_Ax.u, U=C_i_Ax.q)
+                grad_cal = -2*dot_2(dXAx, c_left_hand_term[i, :])
+                # Construire le vecteur dXAx = (∂_{α_i} X) As
+                #dXAx = dXAx.at[i].set(2.0 * X_shift(Ax[i]))
+                #grad_cal = - * dot_2(X_shift(Ax[i,:]), left_hand_term[i,:])
+                #grad_cal = - dot_2(X_shift(Ax[i,:]), left_hand_term[i,:])
+                if priors_dict[key] != 0:
+                    grad_prior = 2 * angles_diff[i] / priors_dict[key]**2
+                    #grad_prior = 0
+                else:
+                    grad_prior = 0
+                final_grad_log += (grad_cal + grad_prior)* beta_tau[key]
+            else:
+                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
+
+        #Npix = -786432
+        Npix = 1
+
+        return logL/Npix, final_grad_log/Npix
+
+    def spectral_likelihood(params):
+        """
+            Compute the log-proba given a set of parameters 
+        """
+
+        jax.debug.print("params = {}", params)
+
+        # Select parameters which are to be estimated 
+        parameters_dict = dict()
+        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
+            if param_name in params:
+                parameters_dict[param_name] = params[param_name]
+            else:
+                parameters_dict[param_name] = fixed_params[param_name]
+
+        _, map_s, AOND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
+
+        if angles_prior_dict is None:
+            logL = -dot_2(AOND, map_s)
+        else:
+            n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
+            angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
+            first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
+            prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
+            angles_diff = angles_jnp - first_angles_jnp
+            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
+            logL = -dot_2(AOND, map_s) + term2
+
+        #Npix = -786432
+        Npix = 1
+
+        # Compute the negative log-likelihood
+        return logL/Npix #Positive log-likelihood for hmc
 
     def Hessienne_plus_corner_plot(params):
 
-        fact = 180/np.pi # radians to degrees factor
-
-        params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
+        param_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
                     if p in params]
 
         # 2. Convertir dict -> vecteur plat
         def params_to_vec(params_dict):
-            return jnp.array([params_dict[k] for k in params_names])
+            return jnp.array([params_dict[k] for k in param_names])
 
         # 3. Convertir vecteur plat -> dict
         def vec_to_params(vec):
-            return {k: vec[i] for i, k in enumerate(params_names)}
+            return {k: vec[i] for i, k in enumerate(param_names)}
 
         def likelihood_vec(vec):
             return spectral_likelihood(vec_to_params(vec))
 
         vec_params = params_to_vec(params)
 
+        #print('output_params :', output_params)
         H = jax.hessian(lambda p: likelihood_vec(p))(vec_params)
         cov = jnp.linalg.inv(H)
         variances = jnp.diag(cov)
         std = jnp.sqrt(variances)
         eigvals = jnp.linalg.eigvals(H)
-        #print('eigvals', eigvals)
-        #print('std', std)
-        #print('cov', cov)
+        print('eigvals', eigvals)
+        print('std', std)
+        print('cov', cov)
 
         # 1. Convertir en numpy
         cov_np = np.array(cov)
+        mean_np = np.array([output_params[k] for k in param_names])
 
-        # Indices des paramètres qui sont des angles
-        angle_indices = [i for i, k in enumerate(params_names) if k in angles_names]
+        return cov_np, mean_np, param_names
 
-        # Vecteur de mise à l'échelle : fact pour les angles, 1 pour les autres
-        scale = np.ones(len(params_names))
-        scale[angle_indices] = fact  # fact = 180/pi
+    if do_minimization:
+        #n_samples = 100
+        fgp = {k: jnp.array(v * 1.02, dtype=jnp.float64) for k, v in first_guess_params.items()}
+        #fgp = {k: v * 0.998 for k, v in first_guess_params.items()}
+        print("Launching minimization!!", flush=True)
+        print('tol',dictionary_parameters_minimization['tol'])
+        print('fgp',fgp)
+        max_iter = 100
+        raw_lower = {
+            'beta_dust': 1.0,
+            'beta_pl': -4.0,
+            'angle_0': -0.1,
+            'angle_1': -0.1,
+            'angle_2': -0.1,
+            'angle_3': -0.1,
+            'angle_4': -0.1,
+            'angle_5': -0.1,
+        }
 
-        # Convertir la moyenne
-        output_params = np.array([params[k] for k in params_names])
-        mean_np = mean_np * scale  # angles en degrés
+        def _match_lower_to_fgp(raw_bounds, ref):
+            """Create bounds with the same dtype/weak_type as ref by doing
+            a small arithmetic using the reference value. Using expressions
+            like `ref_v * 0 + v` preserves the Array properties (dtype and
+            weak_type) coming from `ref_v`.
+            """
+            out = {}
+            for k, v in raw_bounds.items():
+                if k in ref:
+                    ref_v = ref[k]
+                    try:
+                        # Use arithmetic with ref_v to preserve dtype/weak_type
+                        out[k] = (ref_v * 0) + v
+                    except Exception:
+                        # Fallback if ref_v isn't a jax array
+                        try:
+                            dtype = ref_v.dtype
+                        except Exception:
+                            dtype = jnp.float64
+                        out[k] = jnp.asarray(v, dtype=dtype)
+                else:
+                    out[k] = jnp.asarray(v, dtype=jnp.float64)
+            return out
 
-        # Convertir la covariance : C' = D @ C @ D  (D = diag(scale))
-        D = np.diag(scale)
-        cov_np_deg = D @ cov_np @ D
+        lower = _match_lower_to_fgp(raw_lower, fgp)
+        upper = {
+            'beta_dust': jnp.array(3.0),
+            'beta_pl': jnp.array(0.0),
+            'angle_0': jnp.array(6),
+            'angle_1': jnp.array(6),
+            'angle_2': jnp.array(6),
+            'angle_3': jnp.array(6),
+            'angle_4': jnp.array(6),
+            'angle_5': jnp.array(6),
+        }
+        upper = _match_lower_to_fgp(upper, fgp)
 
-        return cov_np_deg, mean_np, params_names, results
+        output_params, output_state = minimize(
+            spectral_likelihood_custom_gradient,   # 1er argument positionnel, plus fn=
+            init_params=fgp,
+            solver_name=solver_name,
+            #lower_bound=lower,
+            #upper_bound=upper,
+            max_iter=max_iter,
+            #rtol=dictionary_parameters_minimization['tol'],
+            #atol=dictionary_parameters_minimization['tol'],
+            rtol=1e-25,
+            atol=0.0,
+        )
+        #final_sample = {k: v[-1] for k, v in mcmc_samples.items()}
+        #for k, v in final_sample.items():
+        #    print(f"{k} = {v}")
 
-    def run_inference(rng_key, initial_position, logprob_fn, num_warmup=100):
+        #print('output_params :', output_params)
+        #print("best_loss:", output_state.best_loss)
+        #print("solver_state:", output_state.solver_state)
+
+        initial_position = {k: jnp.array(v, dtype=jnp.float64) for k, v in fgp.items()}
+
+        def run_inference(rng_key, initial_position, logprob_fn, num_warmup=100):
             warmup = blackjax.window_adaptation(
                 blackjax.hmc,
                 logprob_fn,
@@ -830,133 +923,111 @@ def perform_compsep(
             kernel = jax.jit(hmc.step)
             return state, kernel
 
-    def inference_loop(rng_key, kernel, initial_state, num_samples):
-        @jax.jit
-        def one_step(state, rng_key):
-            state, info = kernel(rng_key, state)
-            return state, (state, info)
+        def inference_loop(rng_key, kernel, initial_state, num_samples):
+            @jax.jit
+            def one_step(state, rng_key):
+                state, info = kernel(rng_key, state)
+                return state, (state, info)
         
-        keys = jax.random.split(rng_key, num_samples)
-        final_state, (states, infos) = jax.lax.scan(one_step, initial_state, keys)
-        return states, infos
-
-    def log_prob(params):
-        return -spectral_likelihood_custom_gradient(params)
-
-    def do_hmc(n_warmup=300,n_samples = 10000):
+            keys = jax.random.split(rng_key, num_samples)
+            final_state, (states, infos) = jax.lax.scan(one_step, initial_state, keys)
+            return states, infos
+        
         rng_key = jax.random.PRNGKey(1)
         rng_key, warmup_key, sample_key = jax.random.split(rng_key, 3)
         
         initial_state, hmc_kernel = run_inference(
             warmup_key,
             first_guess_params,
-            log_prob,
-            n_warmup,
+            spectral_likelihood,
+            num_warmup=300,
         )
         
         states, infos = inference_loop(
             sample_key,
             hmc_kernel,
             initial_state,
-            n_samples,
+            num_samples=10000,
         )
         
         print("Acceptance rate:", np.mean(infos.acceptance_rate))
-
-        position_degrees = {}
-        output_params = {}
-        for name, samples in states.position.items():
-            output_params[name] = np.array(samples)
-            if name.startswith("angle"):
-                position_degrees[name] = np.array(samples) * 180 / np.pi
-            else:
-                position_degrees[name] = np.array(samples)
-
-        samples_array = np.column_stack([v for v in position_degrees.values()])
         
-        #samples_array = np.column_stack([np.array(v) for v in states.position.values()])
-        params_names = list(states.position.keys())
+        samples_array = np.column_stack([np.array(v) for v in states.position.values()])
+        param_names = list(states.position.keys())
         
-        means = np.mean(samples_array, axis=0)
-        stds = np.std(samples_array, axis=0)
-
-        # ✅ Ajout ArviZ : construire idata depuis states.position
-        idata = az.from_dict(
-            posterior={
-                name: np.expand_dims(np.array(samples), axis=0)  # (1, n_draws)
-                for name, samples in states.position.items()
-            }
-        )
+        print("Means:", np.mean(samples_array, axis=0))
+        print("Stds:", np.std(samples_array, axis=0))
         
-        # ✅ Diagnostics de convergence
-        summary = az.summary(idata, round_to=4)
-        print(summary)
+        fig = corner.corner(samples_array, labels=param_names, label_kwargs={"fontsize": 10})
+        fig.savefig("triangle_plot.png", bbox_inches='tight', dpi=150)
+        plt.close(fig)
 
-        # Construire les labels avec mean ± std
-        labels_with_stats = [
-            f"{name} = {mean:.3f} ± {std:.3f}"
-            for name, mean, std in zip(params_names, means, stds)
-        ]
-
-        stats_params_dict = {
-            name: {
-                "mean": float(np.mean(np.array(samples))),
-                "mean_of_std": float(np.std(np.array(samples))),       # std de la chaîne
-                "std_of_mean": float(np.std(np.array(samples)) / np.sqrt(len(np.array(samples))))  # std de la moyenne
-            }
-            for name, samples in states.position.items()
-        }
-        
-        mc_samples = MCSamples(
-            samples=samples_array,
-            names=params_names,
-            labels=labels_with_stats
-        )
-
-        return mc_samples, states, output_params
-
-    mc_samples = None
-    params_names = None
-    cov_np = None
-    if do_minimization:
-
-        print("Launching minimization!!", flush=True)
-        output_params, output_state = minimize(
-        spectral_likelihood_custom_gradient,   # 1er argument positionnel, plus fn=
-        init_params=first_guess_params,
-        solver_name=solver_name,
-        max_iter=config.parametric_sep_pars.megabuster_options.max_iter,
-        rtol=1e-25,
-        atol=0.0,
-        )
-        print('output_params :', output_params)
+        output_params[list(first_guess_params.keys())[0]].block_until_ready()
+        ref, gref = jax.value_and_grad(spectral_likelihood_custom_gradient)(output_params)
+        grad_norm_ref = 0
+        for key in gref:
+            grad_norm_ref += gref[key]**2
+        gref_norm_ref = jnp.sqrt(grad_norm_ref)
+        epsilon = 1.0e-3
+        for k in output_params:
+            print(k)
+            output_params[k] += epsilon
+            for i in range(3):
+                print('param k :', output_params[k])
+                print('params ! :', output_params)
+                l, grad = jax.value_and_grad(spectral_likelihood_custom_gradient)(output_params)
+                grad_norm = 0
+                for key in grad:
+                    grad_norm += grad[key]**2
+                print('working ?')
+                print('l value ?? :', l)
+                print('grad :', grad)
+                print('grad_norm :', jnp.sqrt(grad_norm))
+                print('dgref :', jnp.sqrt(grad_norm) - gref_norm_ref)
+                dref = l - ref
+                print('likelihood dref :', dref)
+                print(i)
+                if i == 2:
+                    output_params[k] += epsilon
+                    continue
+                output_params[k] += -epsilon
+        print(output_params, flush=True)
+        print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
         number_iterations = output_state.iter_num
         print(number_iterations)
-        output_params[list(first_guess_params.keys())[0]].block_until_ready()
-
-        # Ensure these are defined on all code paths to avoid UnboundLocalError
-        if use_hessienne:
-            cov_np, mean_np, params_names, results = Hessienne_plus_corner_plot(output_params)
-            output_params = {k: float(results[i]) for i, k in enumerate(params_names)}
-        elif use_hmc:
-            mc_samples, states, output_params = do_hmc(n_warm, n_samples)
-            #output_params = {k: float(np.mean(np.array(v))) for k, v in states.position.items()}
-            params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
-                    if p in output_params]
-        else:
-            params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
-                    if p in output_params]
+        cov_np, mean_np, param_names = Hessienne_plus_corner_plot(output_params)        
     else:
         print("Skipping minimization, using first guess parameters as output.", flush=True)
         output_params = first_guess_params
+        ref, gref = jax.value_and_grad(spectral_likelihood_custom_gradient)(output_params)
+        grad_norm_ref = 0
+        for key in gref:
+            grad_norm_ref += gref[key]**2
+        gref_norm_ref = jnp.sqrt(grad_norm_ref)
+        epsilon = 1.0e-3
+        for k in output_params:
+            print(k)
+            output_params[k] += epsilon
+            for i in range(3):
+                print('param k :', output_params[k])
+                print('params ! :', output_params)
+                l, grad = jax.value_and_grad(spectral_likelihood_custom_gradient)(output_params)
+                grad_norm = 0
+                for key in grad:
+                    grad_norm += grad[key]**2
+                print('working ?')
+                print('l value ?? :', l)
+                print('grad :', grad)
+                print('grad_norm :', jnp.sqrt(grad_norm))
+                print('dgref :', jnp.sqrt(grad_norm) - gref_norm_ref)
+                dref = l - ref
+                print('likelihood dref :', dref)
+                print(i)
+                if i == 2:
+                    output_params[k] += epsilon
+                    continue
+                output_params[k] += -epsilon
         number_iterations = 0
-        if use_hessienne:
-            cov_np, mean_np, params_names, results = Hessienne_plus_corner_plot(output_params)
-            #output_params = {k: float(results[i]) for i, k in enumerate(params_names)}
-            print('Params names ?? : ', params_names)
-        else:
-            params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
-                    if p in output_params]
 
     A_maxL, final_maps = get_A_s_AOND(output_params)[:2]
 
@@ -987,7 +1058,6 @@ def perform_compsep(
     def W_params(params, input_map):
 
         output_map_truncated = get_A_s_AOND(params)[1][...,pixels_to_retain_nested]
-        #print('output_map_truncated shape :', output_map_truncated.q.shape)
 
         output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
@@ -1010,6 +1080,4 @@ def perform_compsep(
         ordering_component=ordering_component,
         W_params=W_params,
         Cov = cov_np,
-        params_names = params_names,
-        mc_samples = mc_samples
     )
