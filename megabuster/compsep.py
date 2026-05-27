@@ -68,6 +68,7 @@ class Results(object):
     params_names: list = None # Params_names
     #mean_cov: list = None # Mean values of estimated parameters
     mc_samples = None # Results samples from HMC
+    mean_deg = None # Mean values of estimated parameters in degrees if angles were estimated
     def __init__(self):
         self.params = None
         self.x = None
@@ -80,6 +81,7 @@ class Results(object):
         self.Cov = None
         self.params_names = None
         self.mc_samples = None
+        self.mean_deg = None
 
     @classmethod
     def from_compsep_results(
@@ -97,6 +99,7 @@ class Results(object):
         Cov=None,
         params_names = None,
         mc_samples = None,
+        mean_deg = None
 ):
         """
         Create an instance of Results from the component separation results.
@@ -158,6 +161,7 @@ class Results(object):
         res.Cov = Cov
         res.params_names = params_names
         res.mc_samples = mc_samples
+        res.mean_deg = mean_deg
         return res
 
 def dot_2(x,y):
@@ -647,7 +651,7 @@ def perform_compsep(
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
             first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
+            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
             angles_diff = angles_jnp - first_angles_jnp
             term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
             logL = -dot_2(AOND, map_s) + term2
@@ -684,10 +688,12 @@ def perform_compsep(
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
             first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
+            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
             angles_diff = angles_jnp - first_angles_jnp
             term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
             logL = -dot_2(AOND, map_s) + term2
+            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
+            
         else:
             logL = -dot_2(AOND, map_s)
 
@@ -718,7 +724,7 @@ def perform_compsep(
                     X_op = QURotationOperator.create(shape=Ax_idx.q.shape, stokes="QU", angles=-angles_jnp[i] - jnp.pi/4)
                     dXAx = 2 * X_op(Ax_idx)
                     grad_cal = -2*dot_2(dXAx, c_left_hand_term[i, :])
-                    if priors_dict[key] != 0:
+                    if priors_dict[key] is not None:
                         grad_prior = 2 * angles_diff[i] / priors_dict[key]**2
                     else:
                         grad_prior = 0
@@ -753,7 +759,7 @@ def perform_compsep(
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
             first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
+            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
             angles_diff = angles_jnp - first_angles_jnp
             term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
             logL = -dot_2(AOND, map_s) + term2
@@ -788,9 +794,6 @@ def perform_compsep(
         variances = jnp.diag(cov)
         std = jnp.sqrt(variances)
         eigvals = jnp.linalg.eigvals(H)
-        #print('eigvals', eigvals)
-        #print('std', std)
-        #print('cov', cov)
 
         # 1. Convertir en numpy
         cov_np = np.array(cov)
@@ -802,15 +805,15 @@ def perform_compsep(
         scale = np.ones(len(params_names))
         scale[angle_indices] = fact  # fact = 180/pi
 
-        # Convertir la moyenne
-        output_params = np.array([params[k] for k in params_names])
-        mean_np = mean_np * scale  # angles en degrés
+        output_params = np.array([params[k] for k in params_names])  # radians
 
-        # Convertir la covariance : C' = D @ C @ D  (D = diag(scale))
+        mean_np = output_params.copy()
+        mean_np[angle_indices] *= fact  # angles → degrés
+
         D = np.diag(scale)
-        cov_np_deg = D @ cov_np @ D
+        cov_np_deg = D @ cov_np @ D  # covariance en degrés²
 
-        return cov_np_deg, mean_np, params_names, results
+        return cov_np_deg, mean_np, params_names, output_params
 
     def run_inference(rng_key, initial_position, logprob_fn, num_warmup=100):
             warmup = blackjax.window_adaptation(
@@ -918,6 +921,8 @@ def perform_compsep(
     mc_samples = None
     params_names = None
     cov_np = None
+    mean_np = None
+    
     if do_minimization:
 
         print("Launching minimization!!", flush=True)
@@ -931,7 +936,7 @@ def perform_compsep(
         )
         print('output_params :', output_params)
         number_iterations = output_state.iter_num
-        print(number_iterations)
+        print('number ofiterations :', number_iterations)
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
 
         # Ensure these are defined on all code paths to avoid UnboundLocalError
@@ -953,7 +958,6 @@ def perform_compsep(
         if use_hessienne:
             cov_np, mean_np, params_names, results = Hessienne_plus_corner_plot(output_params)
             #output_params = {k: float(results[i]) for i, k in enumerate(params_names)}
-            print('Params names ?? : ', params_names)
         else:
             params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
                     if p in output_params]
@@ -987,7 +991,6 @@ def perform_compsep(
     def W_params(params, input_map):
 
         output_map_truncated = get_A_s_AOND(params)[1][...,pixels_to_retain_nested]
-        #print('output_map_truncated shape :', output_map_truncated.q.shape)
 
         output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
@@ -1011,5 +1014,6 @@ def perform_compsep(
         W_params=W_params,
         Cov = cov_np,
         params_names = params_names,
-        mc_samples = mc_samples
+        mc_samples = mc_samples,
+        mean_deg = mean_np,
     )
