@@ -412,8 +412,8 @@ def perform_compsep(
     angles = angles_prior_dict.pop('angle_central_value')
     first_angles_list = []
     for i, angle in enumerate(angles):
-        angles_dict[f'angle_{i}'] = angle
-        first_angles_list.append(angle)
+        angles_dict[f'angle_{i}'] = jnp.array(angle)
+        first_angles_list.append(jnp.array(angle))
     angles_prior = angles_prior_dict.pop('angle_uncertainty')
     prior_list = []
     for i, prior in enumerate(angles_prior):
@@ -463,6 +463,7 @@ def perform_compsep(
     ])  # shape (6, lmax+1)
 
     B = BeamOperator(lmax=2 * config.nside + config.map2cl_pars.delta_ell, beam_fl=beam_fl, in_structure=invN.in_structure)
+    #B = IdentityOperator(in_structure=invN.in_structure)
 
     # LOAD MASK OPERATOR
 
@@ -479,7 +480,7 @@ def perform_compsep(
         c_right_member = invN(sky_map)
         right_member = B(invN(sky_map)) # Op ?
         c_central_freq_op = invN
-        central_freq_op = B.T @ invN @ B
+        central_freq_op = jax.lax.stop_gradient(B.T @ invN @ B)
     
     def build_preconditioner(invN, matrix_A, angles_jnp, Op):
         """
@@ -578,7 +579,7 @@ def perform_compsep(
             #nude_central_freq_op = C.T @ invN @ C
         elif not use_obsmat:
         #    C = IdentityOperator(in_structure=invN.in_structure)
-        #    operator_rhs = C
+            #operator_rhs = B.T
             c_right_member = invN(sky_map)
         #    right_member = c_right_member # Op ?
             c_central_freq_op = invN
@@ -654,7 +655,7 @@ def perform_compsep(
                     max_steps=dictionary_parameters_CG['max_steps_CG']
                 ), 
                 preconditioner=preconditioner,
-                callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
+                #callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
             )
             print('CG done ?')
             first_central_term = diagonal_central_term(AOND)
@@ -672,6 +673,7 @@ def perform_compsep(
             )
             first_central_term = diagonal_central_term(AOND)
         print('end of get_A_s_AOND ?')
+
         return A, first_central_term, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term
 
     @equinox.filter_custom_jvp
@@ -702,10 +704,9 @@ def perform_compsep(
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
             first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            #prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('nan') for i in range(n_angles)])
+            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
             angles_diff = angles_jnp - first_angles_jnp
-            term2 = jnp.nansum((angles_diff**2) / (prior_jnp**2))
+            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
             logL = -dot_2(AOND, map_s) + term2
         else:
             logL = -dot_2(AOND, map_s)
@@ -743,10 +744,11 @@ def perform_compsep(
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
             first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('nan') for i in range(n_angles)])
+            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
             angles_diff = angles_jnp - first_angles_jnp
-            term2 = jnp.nansum((angles_diff**2) / (prior_jnp**2))
+            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
             logL = -dot_2(AOND, map_s) + term2
+            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
         else:
             logL = -dot_2(AOND, map_s)
 
@@ -981,8 +983,8 @@ def perform_compsep(
     params_names = None
     cov_np = None
     if do_minimization:
-
         print("Launching minimization!!", flush=True)
+        print('first_guess_params :', first_guess_params)
         output_params, output_state = minimize(
         spectral_likelihood_custom_gradient,   # 1er argument positionnel, plus fn=
         init_params=first_guess_params,

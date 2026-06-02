@@ -5,3 +5,5 @@ import megabuster.obsmat
 import megabuster.precomputations 
 import megabuster.tools
 import megabuster.calibrationmatrix
+import megabuster.beam_compsep
+import megabuster.compsep_nude

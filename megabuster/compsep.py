@@ -335,7 +335,10 @@ def perform_compsep(
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
         assert binary_mask.ndim == 1, "Binary mask must be a 1D array."
-        pixels_to_retain = np.where(binary_mask != 0)[0]
+        pixels_mask = np.where(binary_mask != 0)[0]
+        npix_full = invN_matrix.shape[-1]
+        pixels_to_retain = np.arange(npix_full)
+        #pixels_to_retain = np.where(binary_mask != 0)[0]
         pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
     else:
         pixels_to_retain = np.ones_like(invN_matrix.shape[-1], dtype=bool)
@@ -357,28 +360,41 @@ def perform_compsep(
     assert invN_matrix.shape[1] == n_stokes, "Inverse noise covariance matrix must contain only Q and U Stokes parameters."
     
 
-    invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain_nested.size,))
-    
+    #invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain_nested.size,))
+    invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (len(pixels_to_retain),))
+
     for i in range(invN_matrix.shape[0]):
-        invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)[..., pixels_to_retain_nested]
+        #invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)[..., pixels_to_retain_nested]
+        invN_matrix_nested[i] = invN_matrix[i][..., pixels_to_retain]
         # If noiseless tests create identity noise matrix divided by a factor 100:
         #ones_matrix = np.ones(invN_matrix.shape[1:])/100  # shape (n_stokes, n_pixels)
         #invN_matrix_nested[i] = hp.reorder(ones_matrix, r2n=True)[..., pixels_to_retain_nested]
 
+    mask_2d = np.zeros(npix_full, dtype=bool)
+    mask_2d[pixels_to_retain] = True
+
     if isinstance(sky_map, ArrayLike):
         assert sky_map.ndim == 3, "Sky map must have shape (n_frequencies, n_stokes, n_pixels)."
         assert sky_map.shape[1] == n_stokes, "Sky map must contain only Q and U Stokes parameters."
+        #sky_map = Stokes.from_stokes(
+        #    Q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
+        #    U=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
+        #)
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
-            U=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
+            Q=sky_map[:, -2][..., pixels_to_retain], 
+            U=sky_map[:, -1][..., pixels_to_retain]
         )
     else:
         assert sky_map.q.shape[0] == sky_map.u.shape[0], "Sky map must have the same number of Q and U Stokes parameters."
         assert sky_map.q.shape[1] == sky_map.u.shape[1], "Sky map must have the same number of pixels for Q and U Stokes parameters."
         # Retain only the pixels that are not masked
+        #sky_map = Stokes.from_stokes(
+        #    Q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
+        #    U=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
+        #)
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
-            U=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
+            Q=sky_map.q[..., pixels_to_retain], 
+            U=sky_map.u[..., pixels_to_retain]
         )
 
     # Prepare the in_structure of the upcoming operators
@@ -527,14 +543,15 @@ def perform_compsep(
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])[:, None]
             C = build_calibration_operator(-angles_jnp, vect_shape)
+            #C = IdentityOperator(in_structure=in_structure_noise_cov)
             operator_rhs = C.T
             c_right_member = invN(sky_map)
             right_member = operator_rhs(c_right_member) # Op ?
             c_central_freq_op = invN @ C
             central_freq_op = C.T @ invN @ C
         elif not use_obsmat:
-            C = IdentityOperator(in_structure=invN.in_structure)
-            operator_rhs = C
+            #C = IdentityOperator(in_structure=invN.in_structure)
+            #operator_rhs = C
             c_right_member = invN(sky_map)
             right_member = c_right_member # Op ?
             c_central_freq_op = invN
@@ -612,6 +629,8 @@ def perform_compsep(
             first_central_term = diagonal_central_term(AOND)
 
         elif not use_obsmat:
+            Op = A.T @ central_freq_op @ A
+            preconditioner = IdentityOperator(in_structure=Op.in_structure)
             diagonal_central_term = (A.T @ central_freq_op @ A).I(
                 solver=lx.CG(
                     rtol=dictionary_parameters_CG['tol_CG'], 
@@ -622,6 +641,10 @@ def perform_compsep(
                 callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
             )
             first_central_term = diagonal_central_term(AOND)
+            #print('first_central_term 1 = ', first_central_term)
+            #jax.debug.print("'first_central_term 1 = {}", first_central_term)
+
+        #jax.debug.print("'first_central_term 2 = {}", first_central_term)
 
         return A, first_central_term, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term
 
@@ -636,10 +659,10 @@ def perform_compsep(
         for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
             if param_name in params:
                 if param_name in angles_names:
-                    if not use_calibration_matrix:
-                        parameters_dict[param_name] = 0.0
-                    else:
-                        parameters_dict[param_name] = params[param_name]
+                    #if not use_calibration_matrix:
+                    #    parameters_dict[param_name] = 0.0
+                    #else:
+                    parameters_dict[param_name] = params[param_name]
                 else:
                     parameters_dict[param_name] = params[param_name]
             else:
@@ -668,15 +691,17 @@ def perform_compsep(
         params, = primals
         beta_tau, = tangents
 
+        jax.debug.print("params = {}", params)
+
         # Select parameters which are to be estimated 
         parameters_dict = dict()
         for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
             if param_name in params:
                 if param_name in angles_names:
-                    if not use_calibration_matrix:
-                        parameters_dict[param_name] = 0.0
-                    else:
-                        parameters_dict[param_name] = params[param_name]
+                    #if not use_calibration_matrix:
+                    #    parameters_dict[param_name] = 0.0
+                    #else:
+                    parameters_dict[param_name] = params[param_name]
                 else:
                     parameters_dict[param_name] = params[param_name]
             else:
@@ -732,9 +757,13 @@ def perform_compsep(
                 else:
                     final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
         else:
+            ONd = invN(sky_map)
             left_hand_term = ONd - (central_freq_op @ A)(map_s)
             for key in keys_params:
-                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
+                if key.startswith("angle"):
+                    final_grad_log += 0
+                else:
+                    final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
 
         return logL, final_grad_log
 
