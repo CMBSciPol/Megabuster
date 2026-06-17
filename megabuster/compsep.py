@@ -36,6 +36,7 @@ from megabuster.tools import (
     get_maps_from_Stokes, 
     get_dense_furax_operator_from_freq_array
 )
+jax.config.update("jax_enable_x64", True)
 
 __all__ = [
     'Results',
@@ -332,12 +333,23 @@ def perform_compsep(
 
     #assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
+    use_full_sky = True
+
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
         assert binary_mask.ndim == 1, "Binary mask must be a 1D array."
         pixels_mask = np.where(binary_mask != 0)[0]
-        npix_full = invN_matrix.shape[-1]
-        pixels_to_retain = np.arange(npix_full)
+        if use_full_sky:
+            npix_full = invN_matrix.shape[-1]
+            unobserved_pixels = np.where(binary_mask == 0)[0]
+            pixels_to_retain = np.arange(npix_full)
+            n_pix = pixels_to_retain.size
+        else :
+            pixels_to_retain = np.where(binary_mask != 0)[0]
+            pixels_to_retain_t = np.where(binary_mask != 0)[0]
+            n_pix = pixels_to_retain.size
+            #unobserved_pixels = None
+        #unobserved_pixels = np.where(binary_mask == 0)[0]
         #pixels_to_retain = np.where(binary_mask != 0)[0]
         pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
     else:
@@ -361,17 +373,19 @@ def perform_compsep(
     
 
     #invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain_nested.size,))
-    invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (len(pixels_to_retain),))
+    invN_matrix_ring = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain.size,))
+    if use_full_sky:
+        invN_matrix_ring[..., unobserved_pixels] = 0.0
 
     for i in range(invN_matrix.shape[0]):
         #invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)[..., pixels_to_retain_nested]
-        invN_matrix_nested[i] = invN_matrix[i][..., pixels_to_retain]
+        invN_matrix_ring[i] = invN_matrix[i][..., pixels_to_retain]
         # If noiseless tests create identity noise matrix divided by a factor 100:
         #ones_matrix = np.ones(invN_matrix.shape[1:])/100  # shape (n_stokes, n_pixels)
         #invN_matrix_nested[i] = hp.reorder(ones_matrix, r2n=True)[..., pixels_to_retain_nested]
 
-    mask_2d = np.zeros(npix_full, dtype=bool)
-    mask_2d[pixels_to_retain] = True
+    #mask_2d = np.zeros(npix_full, dtype=bool)
+    #mask_2d[pixels_to_retain] = True
 
     if isinstance(sky_map, ArrayLike):
         assert sky_map.ndim == 3, "Sky map must have shape (n_frequencies, n_stokes, n_pixels)."
@@ -402,7 +416,7 @@ def perform_compsep(
     in_structure_noise_cov = sky_map.structure.q
     vect_shape = sky_map.q.shape
 
-    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, in_structure_noise_cov)
+    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_ring, in_structure_noise_cov)
     
     #Noiseless case for tests:
     #invN = IdentityOperator(in_structure=invN2.in_structure)
@@ -435,13 +449,13 @@ def perform_compsep(
         print("Right-hand side of the CG equation precomputed!", flush=True)
 
     if matrix_precond is None:
-        central_matrix_precond = jnp.copy(invN_matrix_nested)
+        central_matrix_precond = jnp.copy(invN_matrix_ring)
     elif use_preconditioner_diag:
             
         if matrix_precond.shape[-1] == binary_mask.size:
             print("Using diag obsmat matrices")
-            matrix_precond = matrix_precond[..., pixels_to_retain_nested]
-        central_matrix_precond = jnp.einsum('fsp,fsp,fsp->fsp', matrix_precond, invN_matrix_nested, matrix_precond)
+            matrix_precond = matrix_precond[..., pixels_to_retain]
+        central_matrix_precond = jnp.einsum('fsp,fsp,fsp->fsp', matrix_precond, invN_matrix_ring, matrix_precond)
 
     elif use_preconditioner_pinv:
         assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
@@ -449,16 +463,15 @@ def perform_compsep(
         assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
 
         if matrix_precond.shape[-2:] == (binary_mask.size, binary_mask.size):
-            central_matrix_precond = matrix_precond[..., pixels_to_retain_nested, pixels_to_retain_nested]
+            central_matrix_precond = matrix_precond[..., pixels_to_retain_ring, pixels_to_retain]
         else:
             central_matrix_precond = matrix_precond
         
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
         
     number_components = 3 # CMB, dust, synchrotron
-    n_pix = pixels_to_retain_nested.size
 
-    def build_preconditioner(invN, matrix_A, angles_jnp, Op):
+    def build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=None):
         """
         Build a diagonal preconditioner for Op = A.T @ C.T @ invN @ C @ A.
         
@@ -500,14 +513,33 @@ def perform_compsep(
         jnp.stack([CtinvNC_QU, CtinvNC_UU], axis=1),
         ], axis=1)
 
+        # 3. Contraction avec A
         matrix = jnp.einsum('fcp, fsjp, fkp -> cksjp', matrix_A, CtinvNC, matrix_A)
-        # (n_comp, n_comp, n_stokes, n_stokes, n_pix)
-
+        # -> (n_comp, n_comp, n_stokes, n_stokes, n_pix)
         # Reshape en (n_pix, n_comp*n_stokes, n_comp*n_stokes)
         n_comp, _, n_stokes, _, n_pix = matrix.shape
         matrix_2d = matrix.transpose(4, 0, 2, 1, 3).reshape(n_pix, n_comp*n_stokes, n_comp*n_stokes)
 
-        inv_matrix_2d = jnp.linalg.inv(matrix_2d)  # (n_pix, n_comp*n_stokes, n_comp*n_stokes)
+        # 4. Regularisation : remplacer les pixels non-observés par l'identité avant inversion
+        eye = jnp.eye(n_comp * n_stokes)
+
+        if unobserved_pixels is not None:
+            matrix_2d = matrix_2d.at[unobserved_pixels].set(eye)
+
+        #jax.debug.print("NaN in matrix_2d after regularization: {}", jnp.any(jnp.isnan(matrix_2d)))
+        #jax.debug.print("Inf in matrix_2d after regularization: {}", jnp.any(jnp.isinf(matrix_2d)))
+        #jax.debug.print("NaN in matrix_A: {}", jnp.any(jnp.isnan(matrix_A)))
+        #jax.debug.print("NaN in invN_Q: {}", jnp.any(jnp.isnan(invN_Q)))
+        #jax.debug.print("NaN in invN_U: {}", jnp.any(jnp.isnan(invN_U)))
+        #jax.debug.print("NaN in CtinvNC: {}", jnp.any(jnp.isnan(CtinvNC)))
+
+        # 5. Inversion (plus de singularité)
+        inv_matrix_2d = jnp.linalg.inv(matrix_2d) # (n_pix, n_comp*n_stokes, n_comp*n_stokes)
+        #jax.debug.print("NaN in inv_matrix_2d: {}", jnp.any(jnp.isnan(inv_matrix_2d)))
+        # 6. Remettre à zéro les pixels non-observés
+        #inv_matrix_2d = inv_matrix_2d.at[unobserved_pixels].set(0.0)
+        if unobserved_pixels is not None:
+            inv_matrix_2d = inv_matrix_2d.at[unobserved_pixels].set(0.0)
 
         # Reshape back
         preconditioner_matrix = inv_matrix_2d.reshape(n_pix, n_comp, n_stokes, n_comp, n_stokes).transpose(1, 3, 2, 4, 0)
@@ -519,6 +551,34 @@ def perform_compsep(
             in_structure=as_structure(Op.in_structure['cmb'])
         )
  
+    def build_preconditioner(invN, matrix_A, Op, unobserved_pixels=None):
+        invN_Q = invN.block_leaves[0]._diagonal
+        invN_U = invN.block_leaves[1]._diagonal
+
+        M_Q = jnp.einsum('fcp, fp, fkp -> ckp', matrix_A, invN_Q, matrix_A)
+        M_U = jnp.einsum('fcp, fp, fkp -> ckp', matrix_A, invN_U, matrix_A)
+
+        # Regulariser les pixels non-observés
+        if unobserved_pixels is not None:
+            eye = jnp.eye(M_Q.shape[0])  # (n_comp, n_comp)
+            M_Q = M_Q.at[:, :, unobserved_pixels].set(eye[..., None])
+            M_U = M_U.at[:, :, unobserved_pixels].set(eye[..., None])
+
+        inv_M_Q = jnp.linalg.inv(M_Q.transpose(2, 0, 1)).transpose(1, 2, 0)
+        inv_M_U = jnp.linalg.inv(M_U.transpose(2, 0, 1)).transpose(1, 2, 0)
+
+        # Remettre à zéro les pixels non-observés
+        if unobserved_pixels is not None:
+            inv_M_Q = inv_M_Q.at[:, :, unobserved_pixels].set(0.0)
+            inv_M_U = inv_M_U.at[:, :, unobserved_pixels].set(0.0)
+
+        preconditioner_matrix = jnp.stack([inv_M_Q, inv_M_U], axis=2)
+
+        return get_preconditioner(
+            preconditioner_matrix,
+            in_structure=as_structure(Op.in_structure['cmb'].q)
+        )
+    
     # @equinox.filter_jit
     def get_A_s_AOND(params):
         """
@@ -619,17 +679,20 @@ def perform_compsep(
 
         if use_calibration_matrix:
             Op = A.T @ central_freq_op @ A
-
             # Construction de matrix_A
             matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
             for i, component in enumerate(A.block_leaves):
                 matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
             
-            diagonal_central_term = build_preconditioner(invN, matrix_A, angles_jnp, Op)
+            if use_full_sky:
+                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
+            else:
+                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
             first_central_term = diagonal_central_term(AOND)
 
         elif not use_obsmat:
             Op = A.T @ central_freq_op @ A
+            #preconditioner = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
             preconditioner = IdentityOperator(in_structure=Op.in_structure)
             diagonal_central_term = (A.T @ central_freq_op @ A).I(
                 solver=lx.CG(
@@ -993,39 +1056,40 @@ def perform_compsep(
 
     A_maxL, final_maps = get_A_s_AOND(output_params)[:2]
 
-    A_maxL_array = np.zeros((frequencies.size, number_components, n_pix))
+    n_pix_retain = pixels_to_retain.size
+
+    A_maxL_array = np.zeros((frequencies.size, number_components, n_pix_retain))
     for component in range(number_components):
         A_maxL_array[:,component] = A_maxL.block_leaves[component]._diagonal
 
 
-    final_maps_nested = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
+    final_maps_ring = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
 
-    final_maps_full_sky = np.zeros((number_components, final_maps_nested.shape[-2], binary_mask.shape[-1]), dtype=final_maps_nested.dtype)
-    final_maps_full_sky[..., pixels_to_retain_nested] = final_maps_nested
-
+    final_maps_full_sky = np.zeros((number_components, final_maps_ring.shape[-2], binary_mask.shape[-1]), dtype=final_maps_ring.dtype)
+    final_maps_full_sky[..., pixels_to_retain] = final_maps_ring
 
     def W_maxL(input_map):
             
-        output_map_truncated = get_A_s_AOND(output_params)[1][...,pixels_to_retain_nested]
+        output_map_truncated = get_A_s_AOND(output_params)[1][...,pixels_to_retain_t]
 
-        output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
+        output_map_ring = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
-        output_map = np.zeros((number_components,output_map_nested.shape[-2], input_map.shape[-1]), dtype=output_map_nested.dtype)
+        output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_ring.dtype)
         
-        output_map[..., pixels_to_retain_nested] = output_map_nested
+        output_map[..., pixels_to_retain_t] = output_map_ring
         for i in range(number_components):
             output_map[i] = hp.reorder(output_map[i], n2r=True)
         return output_map
 
     def W_params(params, input_map):
 
-        output_map_truncated = get_A_s_AOND(params)[1][...,pixels_to_retain_nested]
+        output_map_truncated = get_A_s_AOND(params)[1][...,pixels_to_retain_t]
 
-        output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
+        output_map_ring = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
-        output_map = np.zeros((number_components,output_map_nested.shape[-2], input_map.shape[-1]), dtype=output_map_nested.dtype)
+        output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_nested.dtype)
         
-        output_map[..., pixels_to_retain_nested] = output_map_nested
+        output_map[..., pixels_to_retain_t] = output_map_ring
         for i in range(number_components):
             output_map[i] = hp.reorder(output_map[i], n2r=True)
         return output_map

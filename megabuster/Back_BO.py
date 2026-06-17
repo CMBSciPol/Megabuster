@@ -24,7 +24,6 @@ from furax.tree import as_structure
 from furax.obs.stokes import Stokes
 from furax.obs.operators._qu_rotations import QURotationOperator
 from furax.obs.operators._beam_operator import BeamOperator
-#from furax.obs.operators._beam_operator import MaskOperator
 
 from furax_cs import minimize, SOLVER_NAMES
 
@@ -385,7 +384,7 @@ def perform_compsep(
     #invN_matrix_ring[..., ~mask_2d] = jnp.nan
 
     #invN_matrix_ring[..., unobserved_pixels] = np.nan
-    invN_matrix_ring[..., unobserved_pixels] = 0.0
+    invN_matrix_ring[..., unobserved_pixels] = np.nan
 
     if isinstance(sky_map, ArrayLike):
         assert sky_map.ndim == 3, "Sky map must have shape (n_frequencies, n_stokes, n_pixels)."
@@ -411,6 +410,8 @@ def perform_compsep(
     vect_shape = sky_map.q.shape
 
     invN = get_diagonal_operator_from_stokes_maps(invN_matrix_ring, in_structure_noise_cov)
+
+    print('Post invN')
     
     #Noiseless case for tests:
     #invN = IdentityOperator(in_structure=invN2.in_structure)
@@ -466,6 +467,8 @@ def perform_compsep(
         number_components = 3 # CMB, dust, synchrotron
         n_pix = pixels_to_retain.size
 
+    print('Pre Beam Opeator')
+
     # LOAD BEAM OPERATOR
 
     beams = config.beams
@@ -478,8 +481,12 @@ def perform_compsep(
         lmax=2 * config.nside + config.map2cl_pars.delta_ell,
         beam_fl=beam_fl,
         in_structure=invN.in_structure,
-        unobserved_pixels=unobserved_pixels  # np.where(binary_mask == 0)[0]
+        #unobserved_pixels=unobserved_pixels  # np.where(binary_mask == 0)[0]
         )
+    
+    print('Post Beam Opeator')
+
+
     Op_rhs = B.T
     #print('invN(sky_map) = ', jnp.sum(invN(sky_map).q**2))
     ONd = Op_rhs(invN(sky_map))
@@ -488,9 +495,69 @@ def perform_compsep(
     #print("invN(sky_map).q shape:", invN(sky_map).q.shape)
     #print("B.in_structure:", B.in_structure)
 
-    n_pix = pixels_to_retain.size
+    #print("Beam in_structure", invN.in_structure)
 
-    def cg_with_residuals(Op, b, preconditioner=None, tol=1e-16, max_steps=1000):
+    # Test hors du pipeline
+    #test_map = invN(sky_map)
+
+    # Étape 1 : mettre NaN sur les pixels non-observés
+    #test_nan = jax.tree.map(
+    #    lambda leaf: leaf.at[..., unobserved_pixels].set(jnp.nan), test_map
+    #)
+    #print("test_nan q norm:", jnp.sum(jnp.nan_to_num(test_nan.q, nan=0.0)**2))
+
+    # Étape 2 : SHT
+    #from furax.math.sht import Map2Alm, Alm2Map
+    #import jax_healpy as jhp
+    #nside = config.nside
+    #lmax = 2 * config.nside + config.map2cl_pars.delta_ell
+    #map2alm = Map2Alm(lmax=lmax, nside=nside, in_structure=B.in_structure)
+    #alm = map2alm.mv(test_nan)
+    #print("alm q norm:", jnp.sum(jnp.abs(alm.q)**2))
+
+    # Étape 3 : alm2map
+    #alm2map = Alm2Map(lmax=lmax, nside=nside, in_structure=map2alm.out_structure)
+    #out = alm2map.mv(alm)
+    #print("out q norm avant nan_to_num:", jnp.sum(jnp.nan_to_num(out.q, nan=0.0)**2))
+
+    number_components = 3 # CMB, dust, synchrotron
+    #central_freq_op = B.T @ invN @ B
+
+    n = 10
+
+    #a = B(sky_map)
+
+    #print('a = ', a)
+
+    #print("NaN in a q:", jnp.any(jnp.isnan(a.q)))
+    central_freq_op = B.T @ invN @ B
+
+    #_ = central_freq_op(invN(sky_map))
+    #_.q.block_until_ready()
+
+    print('Pre iteration Beam Opeator')
+
+    #for i in range(n):
+    #    t0 = time.time()
+        #Obj = central_freq_op(sky_map)
+        #Obj.q.block_until_ready()
+    #    a = B(sky_map)
+    #    print('i = ', i)
+    #    print(f"Temps moyen par application : {(time.time() - t0):.3f}s")
+        #print('Objs.q shape = ', a)
+
+    print('Post iteration Beam Opeator')
+
+    if not use_calibration_matrix and not use_obsmat:
+        print("Conditions verifieds")
+        operator_rhs = B
+        c_right_member = invN(sky_map)
+        #right_member = B(invN(sky_map)) # Op ?
+        right_member = invN(sky_map)
+        c_central_freq_op = invN
+        central_freq_op = jax.lax.stop_gradient(B.T @ invN @ B)
+
+    def cg_with_residuals(Op, b, preconditioner=None, tol=1e-6, max_steps=400):
         """CG custom JAX avec tracking des résidus"""
         
         def matvec(x):
@@ -527,44 +594,18 @@ def perform_compsep(
         else:
             print(f"⚠ CG non convergé après {max_steps} itérations, résidu final = {res_norm:.4e}", flush=True)
 
+        plt.figure()
+        plt.semilogy(residuals)
+        plt.xlabel("Itération")
+        plt.ylabel("||r||")
+        plt.title("Convergence CG")
+        plt.axhline(tol, color='r', linestyle='--', label='tol')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("convergence_cg.png")
+        plt.show()
+
         return x, residuals
-
-    #print("Beam in_structure", invN.in_structure)
-
-    # Test hors du pipeline
-    #test_map = invN(sky_map)
-
-    # Étape 1 : mettre NaN sur les pixels non-observés
-    #test_nan = jax.tree.map(
-    #    lambda leaf: leaf.at[..., unobserved_pixels].set(jnp.nan), test_map
-    #)
-    #print("test_nan q norm:", jnp.sum(jnp.nan_to_num(test_nan.q, nan=0.0)**2))
-
-    # Étape 2 : SHT
-    #from furax.math.sht import Map2Alm, Alm2Map
-    #import jax_healpy as jhp
-    #nside = config.nside
-    #lmax = 2 * config.nside + config.map2cl_pars.delta_ell
-    #map2alm = Map2Alm(lmax=lmax, nside=nside, in_structure=B.in_structure)
-    #alm = map2alm.mv(test_nan)
-    #print("alm q norm:", jnp.sum(jnp.abs(alm.q)**2))
-
-    # Étape 3 : alm2map
-    #alm2map = Alm2Map(lmax=lmax, nside=nside, in_structure=map2alm.out_structure)
-    #out = alm2map.mv(alm)
-    #print("out q norm avant nan_to_num:", jnp.sum(jnp.nan_to_num(out.q, nan=0.0)**2))
-
-    number_components = 3 # CMB, dust, synchrotron
-    #central_freq_op = B.T @ invN @ B
-
-    if not use_calibration_matrix and not use_obsmat:
-        print("Conditions verifieds")
-        operator_rhs = B
-        c_right_member = invN(sky_map)
-        #right_member = B(invN(sky_map)) # Op ?
-        right_member = invN(sky_map)
-        c_central_freq_op = invN
-        central_freq_op = jax.lax.stop_gradient(B.T @ invN @ B)
     
     def build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=None):
         """
@@ -717,13 +758,12 @@ def perform_compsep(
         #    right_member = c_right_member # Op ?
             c_central_freq_op = invN
             #central_freq_op = B.T @ invN @ B
-            central_freq_op = invN
+            #central_freq_op = invN
 
         # Mixing matrix operator
         A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
-        AND = A.T(invN(sky_map))
         #jax.debug.print("sky_map q norm: {}", jnp.sum(sky_map.q**2))
         #jax.debug.print("right_member cmb q norm: {}", jnp.sum(right_member.q**2))
         #jax.debug.print("AOND cmb q norm: {}", jnp.sum(AOND['cmb'].q**2))
@@ -813,12 +853,18 @@ def perform_compsep(
             #angles_jnp = jnp.zeros(frequencies.size)
             #diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
             preconditioner = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
-            #preconditioner = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
             print('ici')
+            first_central_term, residuals_cg = cg_with_residuals(
+                Op=A.T @ invN @ A,
+                b=AOND,
+                preconditioner=preconditioner,
+                tol=dictionary_parameters_CG['tol_CG'],
+                max_steps=dictionary_parameters_CG['max_steps_CG']
+                )
             #preconditioner = IdentityOperator(in_structure=Op.in_structure)
             #diagonal_central_term = (A.T @ central_freq_op @ A).I(
             #diagonal_central_term = (A.T @ O @ A).I(
-            #    solver=lx.GMRES(
+            #    solver=lx.CG(
             #        rtol=dictionary_parameters_CG['tol_CG'], 
             #        atol=dictionary_parameters_CG['tol_CG'], 
             #        max_steps=dictionary_parameters_CG['max_steps_CG']
@@ -826,25 +872,11 @@ def perform_compsep(
             #    preconditioner=preconditioner,
             #    callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
             #)
-
-            #first_central_term = 0
-
-            #first_central_term, residuals_cg = cg_with_residuals(
-            #    Op=A.T @ invN @ A,
-            #    b=AOND,
-            #    preconditioner=preconditioner,
-            #    tol=dictionary_parameters_CG['tol_CG'],
-            #    max_steps=dictionary_parameters_CG['max_steps_CG']
-            #    )
-            #B_comp = BeamComponentOperator(beam_op=B_single, in_structure=AOND.structure)
-            diagonal_central_term = preconditioner    
-            first_central_term = diagonal_central_term(AND)
-            
+            first_central_term = diagonal_central_term(AOND)
         print('end of get_A_s_AOND ?')
         #jax.debug.print("NaN in AOND: {}", jnp.any(jnp.isnan(AOND['cmb'].q)))
 
-        #return A, first_central_term, AOND, c_central_freq_op, d, c_right_member, right_member, d2
-        return A, first_central_term, AOND, AND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term
+        return A, first_central_term, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term
 
     @equinox.filter_custom_jvp
     def spectral_likelihood_custom_gradient(params):
@@ -868,18 +900,10 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        _, map_s, AOND, AND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
+        #_, map_s, AOND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
 
-        if use_calibration_matrix:
-            n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
-            angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
-            first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
-            angles_diff = angles_jnp - first_angles_jnp
-            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
-            logL = -dot_2(AND, map_s) + term2
-        else:
-            logL = -dot_2(AND, map_s)
+
+        logL = 0
 
         return logL
 
@@ -908,60 +932,10 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        A, map_s, AOND, AND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ = get_A_s_AOND(parameters_dict)
+        #A, map_s, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ = get_A_s_AOND(parameters_dict)
 
-        if use_calibration_matrix:
-            n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
-            angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])
-            first_angles_jnp = jnp.array([first_angles_list[i] for i in range(n_angles)])
-            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
-            angles_diff = angles_jnp - first_angles_jnp
-            term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
-            logL = -dot_2(AND, map_s) + term2
-            prior_jnp = jnp.array([prior_list[i] if prior_list[i] is not None else float('inf') for i in range(n_angles)])
-        else:
-            logL = -dot_2(AND, map_s)
-
-        A_deriv = create_MixingMatrixOperator_deriv(
-            frequencies, 
-            parameters_dict, 
-            in_structure_sed, 
-            dust_nu0=dust_nu0, 
-            synchrotron_nu0=synchrotron_nu0, 
-            patch_indices=patch_indices
-        )
-
-        keys_params = params.keys()
+        logL = 0
         final_grad_log = 0
-
-        if use_calibration_matrix:
-            c_left_hand_term = c_right_member - (c_central_freq_op @ A)(map_s)
-            left_hand_term = right_member - (central_freq_op @ A)(map_s)
-            Ax = A(map_s)
-            for key in keys_params:
-                if key.startswith("angle"):  # si le paramètre est un angle de calibration
-                    # On récupère l'index du bloc correspondant à cet angle
-                    # tu peux construire ce dict angle->index avant
-                    # Rotation infinitésimale via l'astuce +pi/4 en faisant attention l'operateur R(θ)
-                    # est définit par une rotation de -θ
-                    i = int(key.split("_")[1])
-                    Ax_idx = Ax[i,:]
-                    X_op = QURotationOperator.create(shape=Ax_idx.q.shape, stokes="QU", angles=-angles_jnp[i] - jnp.pi/4)
-                    dXAx = 2 * X_op(Ax_idx)
-                    grad_cal = -2*dot_2(dXAx, c_left_hand_term[i, :])
-                    if priors_dict[key] is not None:
-                        grad_prior = 2 * angles_diff[i] / priors_dict[key]**2
-                    else:
-                        grad_prior = 0
-                    final_grad_log += (grad_cal + grad_prior)* beta_tau[key]
-                else:
-                    final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
-        else:
-            left_hand_term = right_member - (B.T @central_freq_op @ A)(map_s)
-            for key in keys_params:
-                if key.startswith("angle"):
-                    continue
-                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
 
         print('end custom_grad oui ?')
         #jax.debug.print("AOND = {}", AOND)
@@ -983,7 +957,7 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        _, map_s, AOND, AND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
+        _, map_s, AOND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
 
         if angles_prior_dict is None:
             logL = -dot_2(AOND, map_s)
@@ -994,7 +968,7 @@ def perform_compsep(
             prior_jnp = jnp.array([prior_list[i] for i in range(n_angles)])
             angles_diff = angles_jnp - first_angles_jnp
             term2 = jnp.sum((angles_diff**2)/(prior_jnp**2))
-            logL = -dot_2(AND, map_s) + term2
+            logL = -dot_2(AOND, map_s) + term2
 
         Npix = 1
 
@@ -1156,26 +1130,6 @@ def perform_compsep(
     mc_samples = None
     params_names = None
     cov_np = None
-    #print("=== Diagnostic convergence CG ===")
-    #params_diag = {**first_guess_params, **fixed_params}
-    #A_diag, _, AOND_diag, _, _, _, _, _, _ = get_A_s_AOND(params_diag)
-
-    #matrix_A_diag = jnp.zeros((frequencies.size, number_components, npix_full))
-    #for i, component in enumerate(A_diag.block_leaves):
-    #    matrix_A_diag = matrix_A_diag.at[:, i, :].set(component._diagonal)
-
-    #Op_diag = A_diag.T @ invN @ A_diag
-    #Op_cg_diag = A_diag.T @ central_freq_op @ A_diag
-    #preconditioner_diag = build_preconditioner(invN, matrix_A_diag, Op_diag, unobserved_pixels=unobserved_pixels)
-
-    #first_central_term, _ = cg_with_residuals(
-    #    Op=Op_cg_diag,
-    #    b=AOND_diag,
-    #    preconditioner=preconditioner_diag,
-    #    tol=1e-25,
-    #    max_steps=400
-    #)
-    #print("=== Fin diagnostic ===")
     if do_minimization:
         print("Launching minimization!!", flush=True)
         print('first_guess_params :', first_guess_params)
