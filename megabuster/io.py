@@ -113,6 +113,7 @@ def load_matrix_precond(
         array_eigvecs = []
 
         for idx_freq in range(n_freq):
+            print(f'Loading matrix eigen decomposition from {path_matrix_eigen_decomp[idx_freq]}', flush=True)
             add_ = ''
             if not str(path_matrix_eigen_decomp[idx_freq]).endswith('.npz'):
                 add_ = '.npz'
