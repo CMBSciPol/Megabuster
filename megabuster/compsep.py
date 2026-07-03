@@ -581,33 +581,24 @@ def perform_compsep(
             output_map[i] = hp.reorder(output_map[i], n2r=True)
         return output_map
 
-    try:
-        # Move optimizer params to host numpy / python scalars
-        output_params_host = jax.tree_util.tree_map(lambda v: np.array(jax.device_get(v)) if hasattr(v, 'device_buffer') or isinstance(v, jnp.ndarray) else v, output_params)
-    except Exception:
-        # fallback if structure is plain python
-        output_params_host = output_params
 
     # ensure arrays we return are plain numpy on host    
     A_maxL_array = np.array(A_maxL_array)
     final_maps_full_sky = np.array(final_maps_full_sky)
-
-    # replace the heavy closures by None (or implement numpy-only wrappers here)
-    W_maxL_detached = None
-    W_params_detached = None        
+ 
 
     # clear JAX backend caches to free compiled buffers if necessary
     jax.clear_caches()
 
     return Results.from_compsep_results(
-        list(output_params_host.keys()) if isinstance(output_params_host, dict) else list(output_params.keys()),
-        output_params_host,         
-        W_maxL_detached, 
+        list(output_params.keys()),
+        output_params, 
+        W_maxL, 
         A_maxL_array,
         final_maps_full_sky, 
         number_iterations, 
         dictionary_parameters_minimization['max_iter'], 
         ordering_parameter=ordering_parameter, 
         ordering_component=ordering_component,
-        W_params=W_params_detached
+        W_params=W_params
     )
