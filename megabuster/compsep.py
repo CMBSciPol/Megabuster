@@ -582,11 +582,6 @@ def perform_compsep(
         return output_map
 
 
-    # ensure arrays we return are plain numpy on host    
-    A_maxL_array = np.array(A_maxL_array)
-    final_maps_full_sky = np.array(final_maps_full_sky)
- 
-
     # clear JAX backend caches to free compiled buffers if necessary
     jax.clear_caches()
 
