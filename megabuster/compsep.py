@@ -581,6 +581,10 @@ def perform_compsep(
             output_map[i] = hp.reorder(output_map[i], n2r=True)
         return output_map
 
+
+    # clear JAX backend caches to free compiled buffers if necessary
+    jax.clear_caches()
+
     return Results.from_compsep_results(
         list(output_params.keys()),
         output_params, 
