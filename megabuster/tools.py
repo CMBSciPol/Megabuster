@@ -45,19 +45,25 @@ def get_diagonal_operator_from_stokes_maps(stokes_maps, in_structure):
 
     assert len(stokes_maps.shape) >= 2, "stokes_maps must have shape (..., n_stokes, n_pix)"
 
-    nstokes = stokes_maps.shape[-2]
+    # nstokes = stokes_maps.shape[-2]
 
-    tuple_diagonal_operators = tuple(
-        DiagonalOperator(
-            stokes_maps[..., num_stokes, :],
-            in_structure=in_structure
-        ) for num_stokes in range(nstokes)
-    )
-    return BlockDiagonalOperator(
-            StokesQU(
-                    *tuple_diagonal_operators
-            )
+    return DenseBlockDiagonalOperator(
+            stokes_maps,
+            in_structure = in_structure,
+            subscripts = 'fsp,sfp->sfp'
         )
+
+    # tuple_diagonal_operators = tuple(
+    #     DiagonalOperator(
+    #         stokes_maps[..., num_stokes, :],
+    #         in_structure=in_structure
+    #     ) for num_stokes in range(nstokes)
+    # )
+    # return BlockDiagonalOperator(
+    #         StokesQU(
+    #                 *tuple_diagonal_operators
+    #         )
+    #     )
 
 def get_preconditioner(preconditioner_matrix, in_structure):
     """
@@ -100,41 +106,44 @@ def get_dense_furax_operator_from_freq_array(matrix):
     matrix = jnp.asarray(matrix)
 
     in_structure = jax.ShapeDtypeStruct(shape=(matrix.shape[0], matrix.shape[-1]), dtype=matrix.dtype)
-
-    ops_Q = BlockRowOperator(
-                StokesQU(
-                    DenseBlockDiagonalOperator(
-                        matrix[:,0,0,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                ), 
-                    DenseBlockDiagonalOperator(
-                        matrix[:,0,1,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                )
-            )
-            )
-    ops_U = BlockRowOperator(
-                StokesQU(
-                    DenseBlockDiagonalOperator(
-                        matrix[:,1,0,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                    ),
-                    DenseBlockDiagonalOperator(
-                        matrix[:,1,1,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                    )
-                )
-            )
-    list_QU_operators = [ops_Q, ops_U]
-    return BlockColumnOperator(StokesQU(*list_QU_operators))
+    # import IPython; IPython.embed()
+    ops_QU = DenseBlockDiagonalOperator(matrix, in_structure=in_structure, subscripts='fstqp,tfp->sfq')
+    # ops_Q = BlockRowOperator(
+    #             StokesQU(
+    #                 DenseBlockDiagonalOperator(
+    #                     matrix[:,0,0,...], 
+    #                     in_structure=in_structure, 
+    #                     subscripts='fqp,fp->fq'
+    #             ), 
+    #                 DenseBlockDiagonalOperator(
+    #                     matrix[:,0,1,...], 
+    #                     in_structure=in_structure, 
+    #                     subscripts='fqp,fp->fq'
+    #             )
+    #         )
+    #         )
+    # ops_U = BlockRowOperator(
+    #             StokesQU(
+    #                 DenseBlockDiagonalOperator(
+    #                     matrix[:,1,0,...], 
+    #                     in_structure=in_structure, 
+    #                     subscripts='fqp,fp->fq'
+    #                 ),
+    #                 DenseBlockDiagonalOperator(
+    #                     matrix[:,1,1,...], 
+    #                     in_structure=in_structure, 
+    #                     subscripts='fqp,fp->fq'
+    #                 )
+    #             )
+    #         )
+    # list_QU_operators = [ops_Q, ops_U]
+    return ops_QU #BlockColumnOperator(StokesQU(*list_QU_operators))
 
 def get_A_from_array(matrix_A, in_structure_sed):
     if matrix_A.ndim == 2:
         matrix_to_build = matrix_A[..., None]
+        # matrix_to_build = jnp.broadcast_to(matrix_A, matrix_A.shape + in_structure_sed.shape)
+        # matrix_to_build = jnp.repeat(matrix_A[..., None], in_structure_sed.shape[0], axis=-1)        
     else:
         matrix_to_build = matrix_A
     return BlockRowOperator(
