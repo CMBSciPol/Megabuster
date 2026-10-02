@@ -332,22 +332,21 @@ def perform_compsep(
         assert sky_map.ndim == 3, "Sky map must have shape (n_frequencies, n_stokes, n_pixels)."
         assert sky_map.shape[1] == n_stokes, "Sky map must contain only Q and U Stokes parameters."
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
-            U=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
+            q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
+            u=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
         )
     else:
         assert sky_map.q.shape[0] == sky_map.u.shape[0], "Sky map must have the same number of Q and U Stokes parameters."
         assert sky_map.q.shape[1] == sky_map.u.shape[1], "Sky map must have the same number of pixels for Q and U Stokes parameters."
         # Retain only the pixels that are not masked
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
-            U=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
+            q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
+            u=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
         )
 
     # Prepare the in_structure of the upcoming operators
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
-    in_structure_noise_cov = sky_map.structure.q
-
+    in_structure_noise_cov = sky_map.structure#.q
     invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, in_structure_noise_cov)
 
     # Prepare the observation matrix operator
@@ -425,11 +424,13 @@ def perform_compsep(
                 preconditioner_matrix, 
                 in_structure=as_structure(AOND['cmb'].q)
             )
+        import IPython; IPython.embed()
         if use_preconditioner_pinv:
             print("Using pseudo-inverse preconditioner")
             matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
             for component in range(number_components):
                 matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
+                # matrix_A = matrix_A.at[:,component,:].set(np.array([A.block_leaves[component].sed()[0,:,0]]*n_pix).T)
             
             if patch_indices is None:
                 print("Assuming no patches for the preconditioner computation")
