@@ -11,7 +11,6 @@ from typing import Callable
 import operator
 
 from furax.core import IdentityOperator
-from furax.tree import as_structure
 from furax.obs.stokes import Stokes
 
 from furax_cs import minimize, SOLVER_NAMES
@@ -21,6 +20,7 @@ from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
     get_preconditioner, 
     get_A_from_array, 
+    get_array_from_A,
     get_maps_from_Stokes, 
     get_dense_furax_operator_from_freq_array
 )
@@ -104,8 +104,8 @@ class Results(object):
             
 
             input_maps_stokes = Stokes.from_stokes(
-                Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                q=hp.reorder(input_maps[:,-2,:],r2n=True), 
+                u=hp.reorder(input_maps[:,-1,:],r2n=True)
             )
             return final_W_func(input_maps_stokes)
         
@@ -120,8 +120,8 @@ class Results(object):
                 
 
                 input_maps_stokes = Stokes.from_stokes(
-                    Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                    U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                    q=hp.reorder(input_maps[:,-2,:],r2n=True), 
+                    u=hp.reorder(input_maps[:,-1,:],r2n=True)
                 )
                 return W_params(params, input_maps_stokes)
         else:
@@ -344,10 +344,10 @@ def perform_compsep(
             u=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
         )
 
-    # Prepare the in_structure of the upcoming operators
+    # Prepare the in_structure of the upcoming operators: component maps are (n_stokes, n_pix),
+    # frequency maps are (n_stokes, n_freq, n_pix)
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
-    in_structure_noise_cov = sky_map.structure#.q
-    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, in_structure_noise_cov)
+    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
 
     # Prepare the observation matrix operator
     if obs_mat_operator is None:
@@ -412,26 +412,20 @@ def perform_compsep(
         preconditioner = None
         if use_preconditioner_diag:
             print("Using diagonal preconditioner")
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for component in range(number_components):
-                matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-            
+            matrix_A = get_array_from_A(A, n_pix)
+
             # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
             preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fcp,fsp,fkp->psck', matrix_A, central_matrix_precond, matrix_A)).T)
 
             # Prepare the preconditioner operator
             preconditioner = get_preconditioner(
                 preconditioner_matrix, 
-                in_structure=as_structure(AOND['cmb'].q)
+                in_structure=in_structure_sed
             )
-        import IPython; IPython.embed()
         if use_preconditioner_pinv:
             print("Using pseudo-inverse preconditioner")
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for component in range(number_components):
-                matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-                # matrix_A = matrix_A.at[:,component,:].set(np.array([A.block_leaves[component].sed()[0,:,0]]*n_pix).T)
-            
+            matrix_A = get_array_from_A(A, n_pix)
+
             if patch_indices is None:
                 print("Assuming no patches for the preconditioner computation")
                 matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
@@ -545,9 +539,7 @@ def perform_compsep(
 
     A_maxL, final_maps = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
 
-    A_maxL_array = np.zeros((frequencies.size, number_components, n_pix))
-    for component in range(number_components):
-        A_maxL_array[:,component] = A_maxL.block_leaves[component]._diagonal
+    A_maxL_array = np.asarray(get_array_from_A(A_maxL, n_pix))
 
 
     final_maps_nested = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
