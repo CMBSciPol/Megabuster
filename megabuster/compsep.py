@@ -513,7 +513,17 @@ def perform_compsep(
 
         final_grad_log = 0
         for key in keys_params:
-            final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
+            patch_key = f'{key}_patches'
+            if patch_indices is not None and patch_indices.get(patch_key) is not None:
+                # Per-patch parameter: weight each pixel by the tangent of its patch
+                tangent_per_pixel = beta_tau[key][patch_indices[patch_key]]
+                A_deriv_tangent = get_A_from_array(
+                    jnp.moveaxis(get_array_from_A(A_deriv[key], n_pix) * tangent_per_pixel, 1, 0),
+                    in_structure_sed
+                )
+                final_grad_log += -2*dot_2(A_deriv_tangent(map_s), left_hand_term)
+            else:
+                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
         return logL, final_grad_log
 
     if do_minimization:
