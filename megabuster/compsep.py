@@ -525,7 +525,7 @@ def perform_compsep(
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
             solver_name=solver_name,
-            options=dictionary_parameters_minimization.get('options', None)
+            solver_options=dictionary_parameters_minimization.get('options') or {}
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)
