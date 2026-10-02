@@ -304,8 +304,8 @@ def perform_compsep(
         pixels_to_retain = np.where(binary_mask != 0)[0]
         pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
     else:
-        pixels_to_retain = np.ones_like(invN_matrix.shape[-1], dtype=bool)
-        pixels_to_retain_nested = np.ones_like(pixels_to_retain, dtype=bool)
+        pixels_to_retain = np.arange(invN_matrix.shape[-1])
+        pixels_to_retain_nested = np.arange(invN_matrix.shape[-1])
         binary_mask = np.ones(invN_matrix.shape[-1])
     
     if patch_indices is not None:
