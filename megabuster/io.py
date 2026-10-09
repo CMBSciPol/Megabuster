@@ -3,7 +3,6 @@ import numpy as np
 import scipy as sp
 from opt_einsum import contract
 
-from megabuster.obsmat import to_QU_operators_from_files
 from megabuster.tools import get_dense_furax_operator_from_freq_array
 
 __all__ = [
@@ -39,12 +38,12 @@ def load_obsmat_not_precomputed(path_obsmat, size_obsmat, mask_stacked=None):
 
     return sp.sparse.load_npz(path_obsmat)[:,mask_stacked][mask_stacked,:]
 
-def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, nstokes=None, kind='precomputations_scipy', mask_stacked=None, return_transpose=False):
+def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, kind='precomputations_scipy', mask_stacked=None):
     """
     Load all obsmat from a list of paths.
     """
 
-    assert kind in ['precomputations_indices', 'precomputations_scipy', 'not_precomputed'], "The parameter 'kind' must be one of 'precomputations_scipy', 'precomputations_indices', corresponding respectively to the three different expected formats of the obsmat."
+    assert kind in ['precomputations_scipy', 'not_precomputed'], "The parameter 'kind' must be one of 'precomputations_scipy', 'not_precomputed', corresponding respectively to the two different expected formats of the obsmat."
 
     if kind == 'not_precomputed':
         return [load_obsmat_not_precomputed(
@@ -58,22 +57,6 @@ def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, nstokes=None, kind='pr
             size_obsmat=size_obsmat,
             mask_stacked=mask_stacked
         ) for path_obsmat in list_path_obsmat_prefix]
-    elif kind == 'precomputations_indices':
-        assert nstokes is not None, "When using 'precomputations_indices', the parameter 'nstokes' must be provided so that size_obsmat // nstokes correspond to the number of pixel per observation matrix QQ, QU, UQ, UU for instance."
-        
-        label_stokes = ['q', 'u'] if nstokes == 2 else ['i', 'q', 'u']
-
-        list_precomputations = [
-            [
-                [str(path_obsmat)  + f"_stokes_{label_stokes[i]}_stokes_{label_stokes[j]}.npz" for i in range(nstokes)]
-                for j in range(nstokes)
-            ]
-            for path_obsmat in list_path_obsmat_prefix
-        ]
-        operator_output = to_QU_operators_from_files(list_precomputations, int(size_obsmat))
-        if return_transpose:
-            return operator_output.T
-        return operator_output
 
 def load_matrix_precond(
         path_matrix_eigen_decomp, 

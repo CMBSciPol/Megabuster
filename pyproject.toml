@@ -24,14 +24,14 @@ classifiers = [
     'Operating System :: OS Independent',
     'Topic :: Scientific/Engineering',
 ]
-requires-python = '>=3.7'
+requires-python = '>=3.12'
 license = {file = 'LICENSE'}
 dependencies = [
     'healpy>=0.16.6',
     'jax_grid_search',
     'numpy',
     'scipy',
-    'furax @ git+https://github.com/CMBSciPol/furax.git',
+    'furax>=0.15.3',
     'furax_cs',
     'jax',
     'equinox',
@@ -39,7 +39,9 @@ dependencies = [
     'lineax',
     'jaxtyping',
     'opt_einsum',
-    'tqdm'
+    'tqdm',
+    'pandas',
+    'cmbdb @ git+https://github.com/dpole/cmbdb.git',
 ]
 dynamic = ['version']
 

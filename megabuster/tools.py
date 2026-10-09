@@ -1,23 +1,23 @@
 import numpy as np
 import healpy as hp
-import jax
 import jax.numpy as jnp
 from jaxtyping import ArrayLike
 
-from furax.core import DiagonalOperator, BlockColumnOperator, BlockRowOperator, BlockDiagonalOperator, BlockRowOperator, BroadcastDiagonalOperator, DenseBlockDiagonalOperator
+from furax.core import BlockColumnOperator, BlockRowOperator, BroadcastDiagonalOperator, DenseBlockDiagonalOperator, DiagonalOperator
 from furax.obs.stokes import StokesQU
 
 __all__ = [
     'get_maps_from_Stokes',
     'get_diagonal_operator_from_stokes_maps',
     'get_A_from_array',
+    'get_array_from_A',
     'get_preconditioner',
     'get_healpix_indices_patch_from_mask',
 ]
 
 def get_maps_from_Stokes(final_maps):
     if isinstance(final_maps, StokesQU):
-        return np.array([final_maps.q, final_maps.u])
+        return np.asarray(final_maps.data)
     elif isinstance(final_maps, ArrayLike):
         return final_maps
     else:
@@ -25,53 +25,40 @@ def get_maps_from_Stokes(final_maps):
 
 def get_diagonal_operator_from_stokes_maps(stokes_maps, in_structure):
     """
-    Given stokes maps, return a BlockDiagonalOperator that
-    applies the diagonal operator to a StokesQU object.
-    
+    Given stokes maps, return a DiagonalOperator that
+    applies them elementwise to a StokesQU object.
+
     in_structure is the structure of the StokesQU object.
 
     Parameters
     ----------
     stokes_maps : np.ndarray
         The stokes maps, must have the last two shapes expressed as (..., n_stokes, n_pix).
-    in_structure : ShapeDtypeStruct
-        The structure of the StokesQU object.
+    in_structure : StokesQU
+        The structure of the StokesQU object, whose leaf has shape (n_stokes, ..., n_pix).
 
     Returns
     -------
-    BlockDiagonalOperator
-        The diagonal operator as a BlockDiagonalOperator built from StokesQU pytree.
+    DiagonalOperator
+        The diagonal operator acting on the StokesQU object.
     """
 
     assert len(stokes_maps.shape) >= 2, "stokes_maps must have shape (..., n_stokes, n_pix)"
 
-    nstokes = stokes_maps.shape[-2]
-
-    tuple_diagonal_operators = tuple(
-        DiagonalOperator(
-            stokes_maps[..., num_stokes, :],
-            in_structure=in_structure
-        ) for num_stokes in range(nstokes)
-    )
-    return BlockDiagonalOperator(
-            StokesQU(
-                    *tuple_diagonal_operators
-            )
-        )
+    # Move the Stokes axis in front, as in the StokesQU backing array
+    return DiagonalOperator(jnp.moveaxis(jnp.asarray(stokes_maps), -2, 0), in_structure=in_structure)
 
 def get_preconditioner(preconditioner_matrix, in_structure):
     """
     Given a preconditioner matrix in terms of components, return a BlockColumnOperator that
-    applies the preconditioner to a StokesQU object.
-    
-    in_structure must be as_structure(AOND['cmb'].q)
+    applies the preconditioner to a dictionary of StokesQU component maps.
 
     Parameters
     ----------
     preconditioner_matrix : np.ndarray
-        The preconditioner matrix in terms of components.
-    in_structure : ShapeDtypeStruct
-        The structure of the StokesQU object.
+        The preconditioner matrix in terms of components, of shape (n_comp, n_comp, n_stokes, n_pix).
+    in_structure : StokesQU
+        The structure of a StokesQU component map, of shape (n_stokes, n_pix).
 
     Returns
     -------
@@ -81,11 +68,9 @@ def get_preconditioner(preconditioner_matrix, in_structure):
 
     return BlockColumnOperator({
         component_0: BlockRowOperator({
-            component_1: BlockDiagonalOperator(
-                get_diagonal_operator_from_stokes_maps(
-                    preconditioner_matrix[num_cpt_0, num_cpt_1, :, :],
-                    in_structure
-                )
+            component_1: get_diagonal_operator_from_stokes_maps(
+                preconditioner_matrix[num_cpt_0, num_cpt_1, :, :],
+                in_structure
             ) for num_cpt_1, component_1 in enumerate(['cmb', 'dust', 'synchrotron'])
         }) for num_cpt_0, component_0 in enumerate(['cmb', 'dust', 'synchrotron'])
     })
@@ -99,46 +84,38 @@ def get_dense_furax_operator_from_freq_array(matrix):
 
     matrix = jnp.asarray(matrix)
 
-    in_structure = jax.ShapeDtypeStruct(shape=(matrix.shape[0], matrix.shape[-1]), dtype=matrix.dtype)
-
-    ops_Q = BlockRowOperator(
-                StokesQU(
-                    DenseBlockDiagonalOperator(
-                        matrix[:,0,0,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                ), 
-                    DenseBlockDiagonalOperator(
-                        matrix[:,0,1,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                )
-            )
-            )
-    ops_U = BlockRowOperator(
-                StokesQU(
-                    DenseBlockDiagonalOperator(
-                        matrix[:,1,0,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                    ),
-                    DenseBlockDiagonalOperator(
-                        matrix[:,1,1,...], 
-                        in_structure=in_structure, 
-                        subscripts='fqp,fp->fq'
-                    )
-                )
-            )
-    list_QU_operators = [ops_Q, ops_U]
-    return BlockColumnOperator(StokesQU(*list_QU_operators))
+    in_structure = StokesQU.structure_for((matrix.shape[0], matrix.shape[-1]), dtype=matrix.dtype)
+    return DenseBlockDiagonalOperator(matrix, in_structure=in_structure, subscripts='fstqp,tfp->sfq')
 
 def get_A_from_array(matrix_A, in_structure_sed):
+    """
+    Build a mixing matrix operator from an array of shape (n_comp, n_freq) or (n_comp, n_freq, n_pix),
+    applied as the furax SED operators.
+    """
     if matrix_A.ndim == 2:
         matrix_to_build = matrix_A[..., None]
     else:
         matrix_to_build = matrix_A
     return BlockRowOperator(
-        {component:BroadcastDiagonalOperator(matrix_to_build[num_cpt,...],in_structure=in_structure_sed,) for num_cpt, component in enumerate(['cmb', 'dust', 'synchrotron'])}
+        {
+            component: BroadcastDiagonalOperator(
+                matrix_to_build[num_cpt, ...],
+                axis_destination=(-2, -1),
+                insert_axes=-2,
+                in_structure=in_structure_sed,
+            ) for num_cpt, component in enumerate(['cmb', 'dust', 'synchrotron'])
+        }
+    )
+
+def get_array_from_A(A, n_pix, components=('cmb', 'dust', 'synchrotron')):
+    """
+    Return the mixing matrix operator as an array of shape (n_freq, n_comp, n_pix).
+
+    The SEDs which do not depend on the pixel have shape (n_freq, 1) and are broadcast over the pixels.
+    """
+    return jnp.stack(
+        [jnp.broadcast_to(A.blocks[component].diagonal, (A.blocks[component].diagonal.shape[0], n_pix)) for component in components],
+        axis=1,
     )
 
 def get_healpix_indices_patch_from_mask(mask, nside_patches, nest=False):

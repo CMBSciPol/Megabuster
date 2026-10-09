@@ -11,7 +11,6 @@ from typing import Callable
 import operator
 
 from furax.core import IdentityOperator
-from furax.tree import as_structure
 from furax.obs.stokes import Stokes
 
 from furax_cs import minimize, SOLVER_NAMES
@@ -21,6 +20,7 @@ from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
     get_preconditioner, 
     get_A_from_array, 
+    get_array_from_A,
     get_maps_from_Stokes, 
     get_dense_furax_operator_from_freq_array
 )
@@ -104,8 +104,8 @@ class Results(object):
             
 
             input_maps_stokes = Stokes.from_stokes(
-                Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                q=hp.reorder(input_maps[:,-2,:],r2n=True), 
+                u=hp.reorder(input_maps[:,-1,:],r2n=True)
             )
             return final_W_func(input_maps_stokes)
         
@@ -120,8 +120,8 @@ class Results(object):
                 
 
                 input_maps_stokes = Stokes.from_stokes(
-                    Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                    U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                    q=hp.reorder(input_maps[:,-2,:],r2n=True), 
+                    u=hp.reorder(input_maps[:,-1,:],r2n=True)
                 )
                 return W_params(params, input_maps_stokes)
         else:
@@ -304,8 +304,8 @@ def perform_compsep(
         pixels_to_retain = np.where(binary_mask != 0)[0]
         pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
     else:
-        pixels_to_retain = np.ones_like(invN_matrix.shape[-1], dtype=bool)
-        pixels_to_retain_nested = np.ones_like(pixels_to_retain, dtype=bool)
+        pixels_to_retain = np.arange(invN_matrix.shape[-1])
+        pixels_to_retain_nested = np.arange(invN_matrix.shape[-1])
         binary_mask = np.ones(invN_matrix.shape[-1])
     
     if patch_indices is not None:
@@ -332,23 +332,22 @@ def perform_compsep(
         assert sky_map.ndim == 3, "Sky map must have shape (n_frequencies, n_stokes, n_pixels)."
         assert sky_map.shape[1] == n_stokes, "Sky map must contain only Q and U Stokes parameters."
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
-            U=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
+            q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
+            u=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
         )
     else:
         assert sky_map.q.shape[0] == sky_map.u.shape[0], "Sky map must have the same number of Q and U Stokes parameters."
         assert sky_map.q.shape[1] == sky_map.u.shape[1], "Sky map must have the same number of pixels for Q and U Stokes parameters."
         # Retain only the pixels that are not masked
         sky_map = Stokes.from_stokes(
-            Q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
-            U=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
+            q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
+            u=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
         )
 
-    # Prepare the in_structure of the upcoming operators
+    # Prepare the in_structure of the upcoming operators: component maps are (n_stokes, n_pix),
+    # frequency maps are (n_stokes, n_freq, n_pix)
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
-    in_structure_noise_cov = sky_map.structure.q
-
-    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, in_structure_noise_cov)
+    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
 
     # Prepare the observation matrix operator
     if obs_mat_operator is None:
@@ -413,24 +412,20 @@ def perform_compsep(
         preconditioner = None
         if use_preconditioner_diag:
             print("Using diagonal preconditioner")
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for component in range(number_components):
-                matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-            
+            matrix_A = get_array_from_A(A, n_pix)
+
             # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
             preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fcp,fsp,fkp->psck', matrix_A, central_matrix_precond, matrix_A)).T)
 
             # Prepare the preconditioner operator
             preconditioner = get_preconditioner(
                 preconditioner_matrix, 
-                in_structure=as_structure(AOND['cmb'].q)
+                in_structure=in_structure_sed
             )
         if use_preconditioner_pinv:
             print("Using pseudo-inverse preconditioner")
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for component in range(number_components):
-                matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-            
+            matrix_A = get_array_from_A(A, n_pix)
+
             if patch_indices is None:
                 print("Assuming no patches for the preconditioner computation")
                 matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
@@ -518,7 +513,19 @@ def perform_compsep(
 
         final_grad_log = 0
         for key in keys_params:
-            final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
+            patch_key = f'{key}_patches'
+            if patch_indices is not None and patch_indices.get(patch_key) is not None:
+                raise Exception("Multi-patch version not validated")
+            
+                # Per-patch parameter: weight each pixel by the tangent of its patch
+                tangent_per_pixel = beta_tau[key][patch_indices[patch_key]]
+                A_deriv_tangent = get_A_from_array(
+                    jnp.moveaxis(get_array_from_A(A_deriv[key], n_pix) * tangent_per_pixel, 1, 0),
+                    in_structure_sed
+                )
+                final_grad_log += -2*dot_2(A_deriv_tangent(map_s), left_hand_term)
+            else:
+                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
         return logL, final_grad_log
 
     if do_minimization:
@@ -544,9 +551,7 @@ def perform_compsep(
 
     A_maxL, final_maps = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
 
-    A_maxL_array = np.zeros((frequencies.size, number_components, n_pix))
-    for component in range(number_components):
-        A_maxL_array[:,component] = A_maxL.block_leaves[component]._diagonal
+    A_maxL_array = np.asarray(get_array_from_A(A_maxL, n_pix))
 
 
     final_maps_nested = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
