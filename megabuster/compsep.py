@@ -515,6 +515,8 @@ def perform_compsep(
         for key in keys_params:
             patch_key = f'{key}_patches'
             if patch_indices is not None and patch_indices.get(patch_key) is not None:
+                raise Exception("Multi-patch version not validated")
+            
                 # Per-patch parameter: weight each pixel by the tangent of its patch
                 tangent_per_pixel = beta_tau[key][patch_indices[patch_key]]
                 A_deriv_tangent = get_A_from_array(
