@@ -1,9 +1,12 @@
+import logging
 import jax.numpy as jnp
 import numpy as np
 import scipy as sp
 from opt_einsum import contract
 
 from megabuster.tools import get_dense_furax_operator_from_freq_array
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     'load_obsmat_mask',
@@ -13,7 +16,7 @@ __all__ = [
 
 
 def load_obsmat_mask(path_obsmat, size_obsmat, mask_stacked=None):
-    print("Loading obsmat from path", path_obsmat)
+    logger.info(f"Loading obsmat from path {path_obsmat}")
 
     new_path_obsmat = str(path_obsmat).replace('.npz','')
     mm_data = np.load(new_path_obsmat + "_data.npy")
@@ -31,7 +34,7 @@ def load_obsmat_mask(path_obsmat, size_obsmat, mask_stacked=None):
     return sparse_matrix
 
 def load_obsmat_not_precomputed(path_obsmat, size_obsmat, mask_stacked=None):
-    print("Loading obsmat not precomputed from path", path_obsmat)
+    logger.info(f"Loading obsmat not precomputed from path {path_obsmat}")
 
     if mask_stacked is None:
         mask_stacked = np.ones(size_obsmat, dtype=bool)
@@ -81,14 +84,14 @@ def load_matrix_precond(
         The preconditioner as a dictionary with keys 'diag' and 'pinv'.
     """
     if type(path_matrix_eigen_decomp) is str:
-        print(f"Loading diagonal preconditioner from {path_matrix_eigen_decomp}")
+        logger.info(f"Loading diagonal preconditioner from {path_matrix_eigen_decomp}")
         add_ = ''
         if not str(path_matrix_eigen_decomp).endswith('.npy'):
             add_ = '.npy'
         diag_data = np.load(f"{path_matrix_eigen_decomp}{add_}")
         return diag_data
     elif type(path_matrix_eigen_decomp) is list:
-        print(f"Building and loading matrix eigen decomposition from the list of paths {path_matrix_eigen_decomp}")
+        logger.info(f"Building and loading matrix eigen decomposition from the list of paths {path_matrix_eigen_decomp}")
         
         n_freq = len(path_matrix_eigen_decomp)
         
@@ -96,7 +99,7 @@ def load_matrix_precond(
         array_eigvecs = []
 
         for idx_freq in range(n_freq):
-            print(f'Loading matrix eigen decomposition from {path_matrix_eigen_decomp[idx_freq]}', flush=True)
+            logger.info(f'Loading matrix eigen decomposition from {path_matrix_eigen_decomp[idx_freq]}')
             add_ = ''
             if not str(path_matrix_eigen_decomp[idx_freq]).endswith('.npz'):
                 add_ = '.npz'

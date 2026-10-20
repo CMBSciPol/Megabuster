@@ -1,5 +1,5 @@
 import os, time
-import warnings
+import logging
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -8,6 +8,8 @@ import healpy as hp
 from scipy.sparse import csr_matrix
 from opt_einsum import contract
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     'save_obsmat_precomputation',
@@ -23,17 +25,17 @@ def save_obsmat_precomputation(list_path_obsmat_input, list_path_obsmat_output):
             add_ = '.npz'
         
         path_output = str(list_path_obsmat_output[i])
-        print(f"Loading obsmat from path {path_obsmat}", flush=True)
+        logger.info(f"Loading obsmat from path {path_obsmat}")
 
         if os.path.exists(path_output + "_data.npy") and os.path.exists(path_output + "_row_indices.npy") and os.path.exists(path_output + "_column_indices.npy"):
-            print(f"## Files {path_output}_data.npy, {path_output}_row_indices.npy, {path_output}_column_indices.npy already exist, skipping computation.", flush=True)
+            logger.warning(f"## Files {path_output}_data.npy, {path_output}_row_indices.npy, {path_output}_column_indices.npy already exist, skipping computation.")
             continue
         
         sparse_matrix = scipy.sparse.load_npz(str(path_obsmat)+add_)
 
         row_indices, column_indices, data = scipy.sparse.find(sparse_matrix)
 
-        print(f"Saving to {path_output}_data.npy, {path_output}_row_indices.npy, {path_output}_column_indices.npy", flush=True)
+        logger.info(f"Saving to {path_output}_data.npy, {path_output}_row_indices.npy, {path_output}_column_indices.npy")
 
     
         
@@ -64,7 +66,7 @@ def compute_eigenspectrum_from_matrices(
         if not path_save.endswith('.npz'):
             path_save += '.npz'
         if os.path.exists(path_save):
-            print(f"## File {path_save} already exists, skipping computation.", flush=True)
+            logger.warning(f"## File {path_save} already exists, skipping computation.")
             continue
         
         obsmat_array = jnp.array(list_scipy_obsmat_masked[idx_freq].todense())
@@ -77,14 +79,14 @@ def compute_eigenspectrum_from_matrices(
             obsmat_array
         )
         array_to_eigen.block_until_ready()
-        print("Finish computation in", time.time()-time_start, flush=True)
+        logger.info(f"Finish computation in {time.time()-time_start:.2f} seconds")
         
-        print("Starting eigenvalue decomp", flush=True)
+        logger.info("Starting eigenvalue decomp")
         eigvals, eigvecs = eigh_jitted(array_to_eigen)
         eigvals.block_until_ready()
-        print("Finishing eigenvalue decomp", flush=True)
-        print('---', jnp.min(eigvals), jnp.max(eigvals), jnp.mean(eigvals), jnp.std(eigvals), flush=True)
+        logger.info("Finishing eigenvalue decomp")
+        logger.info(f'--- {jnp.min(eigvals)} {jnp.max(eigvals)} {jnp.mean(eigvals)} {jnp.std(eigvals)}')
         assert jnp.all(eigvals >= threshold), f"Negative eigenvalues found in the eigenspectrum of frequency {idx_freq}. The matrices are not positive semi-definitewith minimum eigenvalue: {jnp.min(eigvals)}, which can lead to numerical instabilities."
 
-        print("Saving to: ", path_save, flush=True)
+        logger.info(f"Saving to: {path_save}")
         jnp.savez(path_save, eigvals=eigvals, eigvecs=eigvecs)

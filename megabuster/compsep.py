@@ -1,4 +1,4 @@
-import warnings
+import logger, warnings
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -24,6 +24,8 @@ from megabuster.tools import (
     get_maps_from_Stokes, 
     get_dense_furax_operator_from_freq_array
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     'Results',
@@ -296,7 +298,7 @@ def perform_compsep(
     # assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
     if do_minimization:
-        print("The minimization will be performed with the following parameters:", dictionary_parameters_minimization, flush=True)
+        logger.info(f"The minimization will be performed with the following parameters: {dictionary_parameters_minimization}")
 
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
@@ -360,17 +362,17 @@ def perform_compsep(
         central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
 
     # Precompute part of the right-hand side of the CG equation
-    print("Precomputing the right-hand side of the CG equation . . .", flush=True)
+    logger.info("Precomputing the right-hand side of the CG equation . . .")
     ONd = obsmat_operator_rhs(invN(sky_map))
     ONd.q.block_until_ready()
-    print("Right-hand side of the CG equation precomputed!", flush=True)
+    logger.info("Right-hand side of the CG equation precomputed!")
 
     if matrix_precond is None:
         central_matrix_precond = jnp.copy(invN_matrix_nested)
     elif use_preconditioner_diag:
             
         if matrix_precond.shape[-1] == binary_mask.size:
-            print("Using diag obsmat matrices")
+            logger.info("Using diag obsmat matrices")
             matrix_precond = matrix_precond[..., pixels_to_retain_nested]
         central_matrix_precond = jnp.einsum('fsp,fsp,fsp->fsp', matrix_precond, invN_matrix_nested, matrix_precond)
 
@@ -411,7 +413,7 @@ def perform_compsep(
 
         preconditioner = None
         if use_preconditioner_diag:
-            print("Using diagonal preconditioner")
+            logger.info("Using diagonal preconditioner")
             matrix_A = get_array_from_A(A, n_pix)
 
             # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
@@ -423,14 +425,14 @@ def perform_compsep(
                 in_structure=in_structure_sed
             )
         if use_preconditioner_pinv:
-            print("Using pseudo-inverse preconditioner")
+            logger.info("Using pseudo-inverse preconditioner")
             matrix_A = get_array_from_A(A, n_pix)
 
             if patch_indices is None:
-                print("Assuming no patches for the preconditioner computation")
+                logger.info("Assuming no patches for the preconditioner computation")
                 matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
             else:
-                print("Assuming patches for the preconditioner computation")
+                logger.info("Assuming patches for the preconditioner computation")
                 matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
 
             pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
@@ -529,7 +531,7 @@ def perform_compsep(
         return logL, final_grad_log
 
     if do_minimization:
-        print("Launching minimization!!", flush=True)
+        logger.info("Launching minimization!!")
         output_params, output_state = minimize(
             init_params=first_guess_params, 
             fn=spectral_likelihood_custom_gradient, 
@@ -540,12 +542,13 @@ def perform_compsep(
             options=dictionary_parameters_minimization.get('options', None)
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
-        print(output_params, flush=True)
-        print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
+        logger.info(f"Final parameters: {output_params}")
+        logger.info(f"Final state: {output_state}")
+        logger.info("Minimization launched!! Preparing the retrieving of the maps . . .")
         number_iterations = output_state.iter_num
-        print("Finished minimization in {} iterations!".format(number_iterations), flush=True)
+        logger.info(f"Finished minimization in {number_iterations} iterations!")
     else:
-        print("Skipping minimization, using first guess parameters as output.", flush=True)
+        logger.info("Skipping minimization, using first guess parameters as output.")
         output_params = first_guess_params
         number_iterations = 0
 
