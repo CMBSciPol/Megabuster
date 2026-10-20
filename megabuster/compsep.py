@@ -166,7 +166,7 @@ def perform_compsep(
     fixed_params=dict(),
     binary_mask=None,
     dust_nu0=150.0, 
-    synchrotron_nu0=20.0, 
+    synchrotron_nu0=150.0, 
     central_freq_op=None,
     obs_mat_operator=None, 
     obsmat_operator_rhs=None,

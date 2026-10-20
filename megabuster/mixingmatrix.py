@@ -16,7 +16,7 @@ single_patch_indices = {
     'beta_dust_patches': None,
     'beta_pl_patches': None,
 }
-def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
+def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=150.0, patch_indices=None):
     """
     Create the mixing matrix operator using the provided parameters.
 
