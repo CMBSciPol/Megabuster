@@ -290,10 +290,14 @@ def perform_compsep(
     assert 'beta_pl' in first_guess_params or 'beta_pl' in fixed_params, "First guess parameters must contain 'beta_pl'."
     assert isinstance(sky_map, (Stokes, ArrayLike)), "Sky map must be a Stokes object or a ndarray."
 
-    boolean_expression = (use_preconditioner_diag != use_preconditioner_pinv) and (use_preconditioner_pinv != use_preconditioner_qr) and (use_preconditioner_diag != use_preconditioner_qr)
+    boolean_expression_1 = not(use_preconditioner_diag != use_preconditioner_pinv) and use_preconditioner_pinv
+    boolean_expression_2 = not(use_preconditioner_pinv != use_preconditioner_qr) and use_preconditioner_qr
+    boolean_expression_3 = not(use_preconditioner_diag != use_preconditioner_qr) and use_preconditioner_qr
+    boolean_expression = boolean_expression_1 or boolean_expression_2 or boolean_expression_3
     assert not(boolean_expression or (use_preconditioner_diag == use_preconditioner_pinv == use_preconditioner_qr == False)), "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, or use_preconditioner_qr) can be used at a time and set to True."
     # assert (use_preconditioner_diag != use_preconditioner_pinv) or (use_preconditioner_pinv == False), "Only one type of preconditioner (use_preconditioner_diag or use_preconditioner_pinv) can be used at a time."
-    assert (use_preconditioner_pinv == (matrix_precond is not None)), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
+    if use_preconditioner_pinv:
+        assert (matrix_precond is not None), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
     
     if dictionary_parameters_minimization['tol'] < dictionary_parameters_CG['tol_CG'] and do_minimization:
         warnings.warn("The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
@@ -356,7 +360,6 @@ def perform_compsep(
     invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
 
 
-    in_structure_pixel = sky_map.structure_for((sky_map.shape[0],))
     # Prepare the observation matrix operator
     if obs_mat_operator is None:
         obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
@@ -399,11 +402,6 @@ def perform_compsep(
 
         assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
 
-        if matrix_precond.shape[-2:] == (binary_mask.size, binary_mask.size):
-            central_matrix_precond = matrix_precond[..., pixels_to_retain_nested, pixels_to_retain_nested]
-        else:
-            central_matrix_precond = matrix_precond
-        
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
     
     elif use_preconditioner_qr:
@@ -411,11 +409,6 @@ def perform_compsep(
         assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
 
         assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
-
-        if matrix_precond.shape[-2:] == (binary_mask.size, binary_mask.size):
-            central_matrix_precond = matrix_precond[..., pixels_to_retain_nested, pixels_to_retain_nested]
-        else:
-            central_matrix_precond = matrix_precond
                 
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
 
