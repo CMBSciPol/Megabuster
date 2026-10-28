@@ -174,6 +174,7 @@ def perform_compsep(
     obsmat_operator_rhs=None,
     use_preconditioner_diag=False,
     use_preconditioner_pinv=False,
+    use_preconditioner_qr=False,
     matrix_precond=None,
     dictionary_parameters_minimization: dict={
         'max_iter':1, 
@@ -288,7 +289,9 @@ def perform_compsep(
     assert 'beta_pl' in first_guess_params or 'beta_pl' in fixed_params, "First guess parameters must contain 'beta_pl'."
     assert isinstance(sky_map, (Stokes, ArrayLike)), "Sky map must be a Stokes object or a ndarray."
 
-    assert (use_preconditioner_diag != use_preconditioner_pinv) or (use_preconditioner_pinv == False), "Only one type of preconditioner (use_preconditioner_diag or use_preconditioner_pinv) can be used at a time."
+    boolean_expression = (use_preconditioner_diag != use_preconditioner_pinv) and (use_preconditioner_pinv != use_preconditioner_qr) and (use_preconditioner_diag != use_preconditioner_qr)
+    assert not(boolean_expression or (use_preconditioner_diag == use_preconditioner_pinv == use_preconditioner_qr == False)), "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, or use_preconditioner_qr) can be used at a time and set to True."
+    # assert (use_preconditioner_diag != use_preconditioner_pinv) or (use_preconditioner_pinv == False), "Only one type of preconditioner (use_preconditioner_diag or use_preconditioner_pinv) can be used at a time."
     assert (use_preconditioner_pinv == (matrix_precond is not None)), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
     
     if dictionary_parameters_minimization['tol'] < dictionary_parameters_CG['tol_CG'] and do_minimization:
@@ -351,6 +354,8 @@ def perform_compsep(
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
     invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
 
+
+    in_structure_pixel = sky_map.structure_for((sky_map.shape[0],))
     # Prepare the observation matrix operator
     if obs_mat_operator is None:
         obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
@@ -360,6 +365,12 @@ def perform_compsep(
     
     if central_freq_op is None:
         central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
+    elif use_preconditioner_qr:
+        logger.warning("The QR decomposition assumes that the central block central_freq_op must be N_{diag}^{1/2} O^T N^{-1} O N_{diag}^{1/2}, so it will be multiplied by the square root of the inverse noise covariance on both sides.")
+        logger.warning("If the central_freq_op was not modified as mentioned, the behaviour of the function must be modified.")
+
+        invN_sqrt = get_diagonal_operator_from_stokes_maps(jnp.sqrt(invN_matrix_nested), sky_map.structure)
+        central_freq_op = invN_sqrt @ central_freq_op @ invN_sqrt
 
     # Precompute part of the right-hand side of the CG equation
     logger.info("Precomputing the right-hand side of the CG equation . . .")
@@ -369,14 +380,20 @@ def perform_compsep(
 
     if matrix_precond is None:
         central_matrix_precond = jnp.copy(invN_matrix_nested)
-    elif use_preconditioner_diag:
-            
+
+        if use_preconditioner_qr:
+            logger.info("Using QR decomposition for the preconditioner computation without a preconditioner matrix provided")
+            central_operator_precond = IdentityOperator(in_structure=sky_map.structure)
+
+    elif use_preconditioner_diag:        
+        logger.info("Using diagonal preconditioner")
         if matrix_precond.shape[-1] == binary_mask.size:
             logger.info("Using diag obsmat matrices")
             matrix_precond = matrix_precond[..., pixels_to_retain_nested]
         central_matrix_precond = jnp.einsum('fsp,fsp,fsp->fsp', matrix_precond, invN_matrix_nested, matrix_precond)
 
     elif use_preconditioner_pinv:
+        logger.info("Using pseudo-inverse preconditioner with a preconditioner matrix provided")
         assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
 
         assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
@@ -387,6 +404,20 @@ def perform_compsep(
             central_matrix_precond = matrix_precond
         
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
+    
+    elif use_preconditioner_qr:
+        logger.info("Using QR decomposition for the preconditioner computation with a preconditioner matrix provided")
+        assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
+
+        assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
+
+        if matrix_precond.shape[-2:] == (binary_mask.size, binary_mask.size):
+            central_matrix_precond = matrix_precond[..., pixels_to_retain_nested, pixels_to_retain_nested]
+        else:
+            central_matrix_precond = matrix_precond
+                
+        central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
+
         
     number_components = 3 # CMB, dust, synchrotron
     n_pix = pixels_to_retain_nested.size
@@ -424,37 +455,41 @@ def perform_compsep(
                 preconditioner_matrix, 
                 in_structure=in_structure_sed
             )
-        if use_preconditioner_pinv:
+        if use_preconditioner_pinv or use_preconditioner_qr:
             logger.info("Using pseudo-inverse preconditioner")
             matrix_A = get_array_from_A(A, n_pix)
 
-            if patch_indices is None:
-                logger.info("Assuming no patches for the preconditioner computation")
-                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
-            else:
-                logger.info("Assuming patches for the preconditioner computation")
-                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
+            if use_preconditioner_pinv:
+                logger.info("Using pseudo-inverse preconditioner for the preconditioner computation")
+                if patch_indices is None:
+                    logger.info("Assuming no patches for the preconditioner computation")
+                    matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
+                else:
+                    logger.info("Assuming patches for the preconditioner computation")
+                    matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
 
-            pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
-                    '...ba,...b,...cb->...ac', 
-                    matrix_vh, 
-                    jnp.where(matrix_s!=0, 1./matrix_s, 0.),
-                    matrix_u,
+                pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
+                        '...ba,...b,...cb->...ac', 
+                        matrix_vh, 
+                        jnp.where(matrix_s!=0, 1./matrix_s, 0.),
+                        matrix_u,
+                    )
                 )
-            )
-            if use_preconditioner_qr:
+
+            elif use_preconditioner_qr:
                 logger.info("Using QR decomposition for the preconditioner computation")
                 q_matrix, r_matrix = jnp.linalg.qr(
-                    jnp.einsum('ab...,a...->...ab', matrix_A, jnp.sqrt(invN_matrix_nested))
+                    jnp.einsum('...ba,a...->...ab', matrix_A.T, jnp.sqrt(invN_matrix_nested))
                 )
                 
                 pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
-                    '...ba,...cb->ac...',
+                    '...ba,...cb->...ac',
                     jnp.linalg.pinv(r_matrix),
                     q_matrix
                 ))
+                print("TEST SHAPE pseudo_inverse_At", pseudo_inverse_At.shape, sky_map.structure, in_structure_pixel, flush=True)
 
-            pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
+            pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_pixel)
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
 
         diagonal_central_term = (A.T @ central_freq_op @ A).I(
