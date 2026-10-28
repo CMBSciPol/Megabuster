@@ -13,6 +13,7 @@ __all__ = [
     'get_array_from_A',
     'get_preconditioner',
     'get_healpix_indices_patch_from_mask',
+    'get_A_from_array_stokes'
 ]
 
 def get_maps_from_Stokes(final_maps):
@@ -117,6 +118,39 @@ def get_array_from_A(A, n_pix, components=('cmb', 'dust', 'synchrotron')):
         [jnp.broadcast_to(A.blocks[component].diagonal, (A.blocks[component].diagonal.shape[0], n_pix)) for component in components],
         axis=1,
     )
+
+
+def get_A_from_array_stokes(matrix_A, in_structure_sed, components=('cmb', 'dust', 'synchrotron')):
+    """
+    Build a mixing-matrix-like operator (components -> frequencies) whose coefficients
+    depend on the Stokes parameter, unlike `megabuster.tools.get_A_from_array`.
+
+    FIX (QR preconditioner): this is needed because the QR pseudo-inverse is computed from
+    N^{-1/2} A, and N differs between Q and U, so its coefficients differ between Q and U.
+    It would naturally belong in megabuster/tools.py.
+
+    Parameters
+    ----------
+    matrix_A : array of shape (n_comp, n_stokes, n_freq, n_pix)
+    in_structure_sed : StokesQU structure of a component map, of shape (n_stokes, n_pix).
+
+    Returns
+    -------
+    BlockRowOperator mapping {'cmb', 'dust', 'synchrotron'} StokesQU maps of shape (n_stokes, n_pix)
+    to a StokesQU frequency map of shape (n_stokes, n_freq, n_pix).
+    """
+    assert matrix_A.ndim == 4, "matrix_A must have shape (n_comp, n_stokes, n_freq, n_pix)"
+    return BlockRowOperator(
+        {
+            component: BroadcastDiagonalOperator(
+                matrix_A[num_cpt],
+                axis_destination=(-3, -2, -1),
+                insert_axes=-2,
+                in_structure=in_structure_sed,
+            ) for num_cpt, component in enumerate(components)
+        }
+    )
+
 
 def get_healpix_indices_patch_from_mask(mask, nside_patches, nest=False):
     """

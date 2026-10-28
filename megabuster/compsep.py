@@ -21,6 +21,7 @@ from megabuster.tools import (
     get_preconditioner, 
     get_A_from_array, 
     get_array_from_A,
+    get_A_from_array_stokes,
     get_maps_from_Stokes, 
     get_dense_furax_operator_from_freq_array
 )
@@ -476,20 +477,27 @@ def perform_compsep(
                     )
                 )
 
+                pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
+
             elif use_preconditioner_qr:
                 logger.info("Using QR decomposition for the preconditioner computation")
-                q_matrix, r_matrix = jnp.linalg.qr(
-                    jnp.einsum('...ba,a...->...ab', matrix_A.T, jnp.sqrt(invN_matrix_nested))
-                )
-                
-                pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
-                    '...ba,...cb->...ac',
+
+                # B = N^{-1/2} A for each (stokes, pixel), shape (n_stokes, n_pix, n_freq, n_comp)
+                weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, jnp.sqrt(invN_matrix_nested))
+                q_matrix, r_matrix = jnp.linalg.qr(weighted_A)
+
+                pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
+                    '...ab,...cb->...ac',
                     jnp.linalg.pinv(r_matrix),
                     q_matrix
                 ))
-                print("TEST SHAPE pseudo_inverse_At", pseudo_inverse_At.shape, sky_map.structure, in_structure_pixel, flush=True)
 
-            pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_pixel)
+                pseudo_inverse_A_op = get_A_from_array_stokes(
+                    jnp.einsum('spcf->csfp', pseudo_inverse_B),
+                    in_structure_sed
+                )
+
+            # With central_operator_precond = Id: preconditioner = pinv(B) pinv(B)^T = (B^T B)^{-1} = (A^T N^{-1} A)^{-1}
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
 
         diagonal_central_term = (A.T @ central_freq_op @ A).I(
