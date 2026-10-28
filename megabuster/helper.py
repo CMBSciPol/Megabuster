@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd 
 from cmbdb import cmbdb
 
+__all__ = ['get_instrument']
+
 def get_instrument(tag=''):
     """ Get a pre-defined instrumental configuration
 

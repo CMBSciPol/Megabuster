@@ -1,4 +1,4 @@
-import logger, warnings
+import logging, warnings
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -539,11 +539,11 @@ def perform_compsep(
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
             solver_name=solver_name,
-            options=dictionary_parameters_minimization.get('options', None)
+            solver_options=dictionary_parameters_minimization.get('options', None)
         ) # first output is the final parameters, second output is the final state of the optimizer 
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         logger.info(f"Final parameters: {output_params}")
-        logger.info(f"Final state: {output_state}")
+        logger.debug(f"Final state: {output_state}")
         logger.info("Minimization launched!! Preparing the retrieving of the maps . . .")
         number_iterations = output_state.iter_num
         logger.info(f"Finished minimization in {number_iterations} iterations!")

@@ -1,11 +1,11 @@
 import logging
 import os
 
-import megabuster.compsep 
-import megabuster.io 
-import megabuster.precomputations 
-import megabuster.tools 
-import megabuster.helper
+from megabuster.compsep import *
+from megabuster.io import *
+from megabuster.precomputations import *
+from megabuster.tools import *
+from megabuster.helper import *
 
 
 
