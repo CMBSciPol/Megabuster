@@ -90,3 +90,54 @@ def compute_eigenspectrum_from_matrices(
 
         logger.info(f"Saving to: {path_save}")
         jnp.savez(path_save, eigvals=eigvals, eigvecs=eigvecs)
+
+def compute_eigenspectrum_from_matrices_v2(
+    list_scipy_obsmat_masked, 
+    inverse_noisecov_QU_ring, 
+    mask_B_nest, 
+    path_output,
+    list_name_output,
+    threshold=1e-20
+):
+    """ Compute the eigenspectrum of the matrices O^T N^{-1} O for each frequency,
+    where O is the observation matrix and N is the noise covariance matrix.
+    The matrices are computed only on the pixels where the mask is non-zero.
+    """
+
+    n_freq = len(list_scipy_obsmat_masked)
+    assert len(list_name_output) == n_freq, "The list of output names must have the same length as the list of observation matrices."
+
+    eigh_jitted = jax.jit(jax.numpy.linalg.eigh, static_argnames=['UPLO', 'symmetrize_input'])
+    for idx_freq in range(n_freq):
+        path_save = path_output+str(list_name_output[idx_freq])
+        if not path_save.endswith('.npz'):
+            path_save += '.npz'
+        if os.path.exists(path_save):
+            logger.warning(f"## File {path_save} already exists, skipping computation.")
+            continue
+        
+        obsmat_array = jnp.array(list_scipy_obsmat_masked[idx_freq].todense())
+
+        invN_nested = hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel()
+        N_nested_sqrt = np.sqrt(np.where(invN_nested != 0, 1/invN_nested, 0))
+        time_start = time.time()
+        array_to_eigen = contract(
+            'a,ab,b,bc,c->ac', 
+            N_nested_sqrt,
+            obsmat_array.T, 
+            invN_nested, 
+            obsmat_array,
+            N_nested_sqrt
+        )
+        array_to_eigen.block_until_ready()
+        logger.info(f"Finish computation in {time.time()-time_start:.2f} seconds")
+        
+        logger.info("Starting eigenvalue decomp")
+        eigvals, eigvecs = eigh_jitted(array_to_eigen)
+        eigvals.block_until_ready()
+        logger.info("Finishing eigenvalue decomp")
+        logger.info(f'--- {jnp.min(eigvals)} {jnp.max(eigvals)} {jnp.mean(eigvals)} {jnp.std(eigvals)}')
+        assert jnp.all(eigvals >= threshold), f"Negative eigenvalues found in the eigenspectrum of frequency {idx_freq}. The matrices are not positive semi-definitewith minimum eigenvalue: {jnp.min(eigvals)}, which can lead to numerical instabilities."
+
+        logger.info(f"Saving to: {path_save}")
+        jnp.savez(path_save, eigvals=eigvals, eigvecs=eigvecs)
