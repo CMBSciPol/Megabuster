@@ -442,6 +442,17 @@ def perform_compsep(
                     matrix_u,
                 )
             )
+            if use_preconditioner_qr:
+                logger.info("Using QR decomposition for the preconditioner computation")
+                q_matrix, r_matrix = jnp.linalg.qr(
+                    jnp.einsum('ab...,a...->...ab', matrix_A, jnp.sqrt(invN_matrix_nested))
+                )
+                
+                pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
+                    '...ba,...cb->ac...',
+                    jnp.linalg.pinv(r_matrix),
+                    q_matrix
+                ))
 
             pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
