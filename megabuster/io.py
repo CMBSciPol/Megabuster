@@ -16,15 +16,21 @@ __all__ = [
 
 
 def load_obsmat_mask(path_obsmat, size_obsmat, mask_stacked=None):
-    logger.info(f"Loading obsmat from path {path_obsmat}")
+    logger.info(f"Loading obsmat precomputed from path {path_obsmat}")
+
+    if mask_stacked is None:
+        mask_stacked = np.ones(size_obsmat, dtype=bool)
+
+    if path_obsmat is None:
+        logger.warning(f"## Path {path_obsmat} is None, returning identity matrix.")
+        return sp.sparse.identity(size_obsmat, format='csr')[:,mask_stacked][mask_stacked,:]
 
     new_path_obsmat = str(path_obsmat).replace('.npz','')
     mm_data = np.load(new_path_obsmat + "_data.npy")
     mm_row_indices = np.load(new_path_obsmat + "_row_indices.npy", )
     mm_column_indices = np.load(new_path_obsmat + "_column_indices.npy")
 
-    if mask_stacked is None:
-        mask_stacked = np.ones(size_obsmat, dtype=bool)
+    
 
     sparse_matrix = sp.sparse.csr_matrix(
         (mm_data, (mm_row_indices, mm_column_indices)),
@@ -39,7 +45,11 @@ def load_obsmat_not_precomputed(path_obsmat, size_obsmat, mask_stacked=None):
     if mask_stacked is None:
         mask_stacked = np.ones(size_obsmat, dtype=bool)
 
-    return sp.sparse.load_npz(path_obsmat)[:,mask_stacked][mask_stacked,:]
+    if path_obsmat is None:
+        logger.warning(f"## Path {path_obsmat} is None, returning identity matrix.")
+        return sp.sparse.identity(size_obsmat, format='csr')[:,mask_stacked][mask_stacked,:]
+
+    return sp.sparse.load_npz(str(path_obsmat))[:,mask_stacked][mask_stacked,:]
 
 def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, kind='precomputations_scipy', mask_stacked=None):
     """
@@ -50,13 +60,13 @@ def load_all_obsmat(list_path_obsmat_prefix, size_obsmat, kind='precomputations_
 
     if kind == 'not_precomputed':
         return [load_obsmat_not_precomputed(
-            path_obsmat=str(path_obsmat),
+            path_obsmat=path_obsmat,
             size_obsmat=size_obsmat,
             mask_stacked=mask_stacked
         ) for path_obsmat in list_path_obsmat_prefix]
     elif kind == 'precomputations_scipy':
         return [load_obsmat_mask(
-            path_obsmat=str(path_obsmat),
+            path_obsmat=path_obsmat,
             size_obsmat=size_obsmat,
             mask_stacked=mask_stacked
         ) for path_obsmat in list_path_obsmat_prefix]

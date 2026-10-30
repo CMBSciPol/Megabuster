@@ -51,7 +51,8 @@ def compute_eigenspectrum_from_matrices(
     path_output,
     list_name_output,
     threshold=1e-20,
-    multiply_N_sqrt=False
+    multiply_N_sqrt=False,
+    indices_freq_not_filtered=None
 ):
     """ Compute the eigenspectrum of the matrices O^T N^{-1} O for each frequency,
     where O is the observation matrix and N is the noise covariance matrix.
@@ -60,6 +61,15 @@ def compute_eigenspectrum_from_matrices(
 
     n_freq = len(list_scipy_obsmat_masked)
     assert len(list_name_output) == n_freq, "The list of output names must have the same length as the list of observation matrices."
+
+    n_pix_masked = mask_B_nest[mask_B_nest != 0].size
+
+    nstokes = inverse_noisecov_QU_ring.shape[1]
+
+    if indices_freq_not_filtered is not None:
+        assert np.isin(indices_freq_not_filtered, np.arange(n_freq)).all(), "The indices of frequencies not filtered must be in the range of the number of frequencies."
+
+        logger.warning(f"Not computing eigenspectra for frequencies indices {indices_freq_not_filtered}, corresponding to name outputs {[list_name_output[i] for i in indices_freq_not_filtered]} ")
 
     eigh_jitted = jax.jit(jax.numpy.linalg.eigh, static_argnames=['UPLO', 'symmetrize_input'])
     for idx_freq in range(n_freq):
@@ -70,6 +80,19 @@ def compute_eigenspectrum_from_matrices(
             logger.warning(f"## File {path_save} already exists, skipping computation.")
             continue
         
+        if idx_freq in indices_freq_not_filtered:
+            logger.warning(f"Skipping computation for frequency index {idx_freq} as it is in the list of frequencies not filtered, storing instead identity matrix.")
+            
+            logger.info(f"Saving to: {path_save}")
+            eigvals = np.ones(nstokes * n_pix_masked)
+            eigvecs = np.eye(nstokes * n_pix_masked)
+
+            if not multiply_N_sqrt:
+                eigvals *= hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel()
+
+            jnp.savez(path_save, eigvals=eigvals, eigvecs=eigvecs)
+            continue
+
         obsmat_array = jnp.array(list_scipy_obsmat_masked[idx_freq].todense())
 
         invN_nested = hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel()
@@ -85,7 +108,7 @@ def compute_eigenspectrum_from_matrices(
                 obsmat_array
             )
         else:
-            logger.info("Computing eigenspectrum oand multiplying by N^1/2...")
+            logger.info("Computing eigenspectrum and multiplying by N^1/2...")
             array_to_eigen = jnp.array(contract(
                 'a,ab,b,bc,c->ac', 
                 N_nested_sqrt,
