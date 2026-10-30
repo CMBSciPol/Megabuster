@@ -176,6 +176,8 @@ def perform_compsep(
     use_preconditioner_diag=False,
     use_preconditioner_pinv=False,
     use_preconditioner_qr=False,
+    use_preconditioner_svd_test=False,
+    indices_freq_not_filtered=None,
     matrix_precond=None,
     dictionary_parameters_minimization: dict={
         'max_iter':1, 
@@ -294,7 +296,7 @@ def perform_compsep(
     boolean_expression_2 = not(use_preconditioner_pinv != use_preconditioner_qr) and use_preconditioner_qr
     boolean_expression_3 = not(use_preconditioner_diag != use_preconditioner_qr) and use_preconditioner_qr
     boolean_expression = boolean_expression_1 or boolean_expression_2 or boolean_expression_3
-    assert not(boolean_expression or (use_preconditioner_diag == use_preconditioner_pinv == use_preconditioner_qr == False)), "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, or use_preconditioner_qr) can be used at a time and set to True."
+    # assert not(boolean_expression or (use_preconditioner_diag == use_preconditioner_pinv == use_preconditioner_qr == False)), "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, or use_preconditioner_qr) can be used at a time and set to True."
     # assert (use_preconditioner_diag != use_preconditioner_pinv) or (use_preconditioner_pinv == False), "Only one type of preconditioner (use_preconditioner_diag or use_preconditioner_pinv) can be used at a time."
     if use_preconditioner_pinv:
         assert (matrix_precond is not None), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
@@ -369,12 +371,33 @@ def perform_compsep(
     
     if central_freq_op is None:
         central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
-    elif use_preconditioner_qr:
-        logger.warning("The QR decomposition assumes that the central block central_freq_op must be N_{diag}^{1/2} O^T N^{-1} O N_{diag}^{1/2}, so it will be multiplied by the square root of the inverse noise covariance on both sides.")
-        logger.warning("If the central_freq_op was not modified as mentioned, the behaviour of the function must be modified.")
 
-        invN_sqrt = get_diagonal_operator_from_stokes_maps(jnp.sqrt(invN_matrix_nested), sky_map.structure)
-        central_freq_op = invN_sqrt @ central_freq_op @ invN_sqrt
+    # elif use_preconditioner_qr:
+    #     logger.warning("The QR decomposition assumes that the central block central_freq_op must be N_{diag}^{1/2} O^T N^{-1} O N_{diag}^{1/2}, so it will be multiplied by the square root of the inverse noise covariance on both sides.")
+    #     logger.warning("If the central_freq_op was not modified as mentioned, the behaviour of the function must be modified.")
+
+    #     invN_sqrt = get_diagonal_operator_from_stokes_maps(jnp.sqrt(invN_matrix_nested), sky_map.structure)
+    #     central_freq_op = invN_sqrt @ central_freq_op @ invN_sqrt
+
+    if indices_freq_not_filtered is not None:
+        assert np.isin(indices_freq_not_filtered, np.arange(frequencies.size)).all(), "The indices of frequencies not filtered must be in the range of the number of frequencies."
+
+        logger.warning(f"Not computing eigenspectra for frequencies indices {indices_freq_not_filtered}, corresponding to frequencies {[frequencies[i] for i in indices_freq_not_filtered]} ")
+        indices_freq_not_filtered = np.array(indices_freq_not_filtered, dtype=int)
+
+    if use_preconditioner_qr or use_preconditioner_svd_test:
+        prefactor_pixel_weight_A = jnp.ones_like(invN_matrix_nested)
+        prefactor_pixel_weight_A = prefactor_pixel_weight_A.at[indices_freq_not_filtered].set(
+            jnp.sqrt(invN_matrix_nested[indices_freq_not_filtered])
+        )
+
+        inverse_prefactor_pixel_weight_A = jnp.ones_like(invN_matrix_nested)
+        inverse_prefactor_pixel_weight_A = inverse_prefactor_pixel_weight_A.at[indices_freq_not_filtered].set(
+            1.0 / jnp.sqrt(invN_matrix_nested[indices_freq_not_filtered])
+        )
+
+        operator_inverse_prefactor = get_diagonal_operator_from_stokes_maps(inverse_prefactor_pixel_weight_A, sky_map.structure)
+
 
     # Precompute part of the right-hand side of the CG equation
     logger.info("Precomputing the right-hand side of the CG equation . . .")
@@ -385,7 +408,7 @@ def perform_compsep(
     if matrix_precond is None:
         central_matrix_precond = jnp.copy(invN_matrix_nested)
 
-        if use_preconditioner_qr:
+        if use_preconditioner_qr or use_preconditioner_svd_test:
             logger.info("Using QR decomposition for the preconditioner computation without a preconditioner matrix provided")
             central_operator_precond = IdentityOperator(in_structure=sky_map.structure)
 
@@ -409,8 +432,21 @@ def perform_compsep(
         assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
 
         assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
-                
-        central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
+
+        # add prefactor_pixel_weight_A
+
+        central_operator_precond = operator_inverse_prefactor @ get_dense_furax_operator_from_freq_array(matrix_precond) @ operator_inverse_prefactor
+
+        
+    
+    elif use_preconditioner_svd_test:
+        logger.info("Using SVD decomposition test for the preconditioner computation with a preconditioner matrix provided")
+        assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
+
+        assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
+        
+
+        central_operator_precond = operator_inverse_prefactor @ get_dense_furax_operator_from_freq_array(matrix_precond) @ operator_inverse_prefactor
 
         
     number_components = 3 # CMB, dust, synchrotron
@@ -449,7 +485,7 @@ def perform_compsep(
                 preconditioner_matrix, 
                 in_structure=in_structure_sed
             )
-        if use_preconditioner_pinv or use_preconditioner_qr:
+        if use_preconditioner_pinv or use_preconditioner_qr or use_preconditioner_svd_test:
             logger.info("Using pseudo-inverse preconditioner")
             matrix_A = get_array_from_A(A, n_pix)
 
@@ -476,7 +512,7 @@ def perform_compsep(
                 logger.info("Using QR decomposition for the preconditioner computation")
 
                 # B = N^{-1/2} A for each (stokes, pixel), shape (n_stokes, n_pix, n_freq, n_comp)
-                weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, jnp.sqrt(invN_matrix_nested))
+                weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, prefactor_pixel_weight_A)
                 q_matrix, r_matrix = jnp.linalg.qr(weighted_A)
 
                 pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
@@ -489,6 +525,25 @@ def perform_compsep(
                     jnp.einsum('spcf->csfp', pseudo_inverse_B),
                     in_structure_sed
                 )
+            elif use_preconditioner_svd_test:
+                logger.info("Using SVD decomposition test for the preconditioner computation")
+
+                weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, prefactor_pixel_weight_A)
+                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(weighted_A, full_matrices=False)
+
+                pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
+                        '...ba,...b,...cb->...ac', 
+                        matrix_vh, 
+                        jnp.where(matrix_s!=0, 1./matrix_s, 0.),
+                        matrix_u,
+                    )
+                )
+
+                pseudo_inverse_A_op = get_A_from_array_stokes(
+                    jnp.einsum('spcf->csfp', pseudo_inverse_B),
+                    in_structure_sed
+                )
+
 
             # With central_operator_precond = Id: preconditioner = pinv(B) pinv(B)^T = (B^T B)^{-1} = (A^T N^{-1} A)^{-1}
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
