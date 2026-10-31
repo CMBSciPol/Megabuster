@@ -2,26 +2,20 @@ import logging, warnings
 import numpy as np
 import jax
 import jax.numpy as jnp
-import equinox
-import lineax as lx
 import healpy as hp
 from jaxtyping import ArrayLike
 from typing import Callable
-
-import operator
 
 from furax.core import IdentityOperator
 from furax.obs.stokes import Stokes
 
 from furax_cs import minimize, SOLVER_NAMES
 
-from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
+from megabuster.likelihood import Likelihood
+from megabuster.preconditioner import get_preconditioner
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
-    get_preconditioner, 
-    get_A_from_array, 
     get_array_from_A,
-    get_A_from_array_stokes,
     get_maps_from_Stokes, 
     get_dense_furax_operator_from_freq_array
 )
@@ -55,6 +49,7 @@ class Results(object):
     success: bool # success of the optimization
     message: str
     W_params: Callable = None # Function to apply the mixing matrix operator at the parameters fitted
+    
     def __init__(self):
         self.params = None
         self.x = None
@@ -138,26 +133,6 @@ class Results(object):
         res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
         res.W_params = final_W_params
         return res
-
-def dot_2(x,y):
-    """Scalar product of two Pytrees.
-
-    If one of the leaves is complex, the hermitian scalar product is returned.
-
-    Args:
-        x: The first Pytree.
-        y: The second Pytree.
-
-    Example:
-        >>> import furax as fx
-        >>> x = {'a': jnp.array([1., 2, 3]), 'b': jnp.array([1, 0])}
-        >>> y = {'a': jnp.array([2, -1, 1]), 'b': jnp.array([2, 0])}
-        >>> fx.tree.dot(x, y)
-        Array(5., dtype=float32)
-    """
-    
-    xy = jax.tree.map(jnp.vdot, x, y)
-    return jax.tree.reduce(operator.add, xy)
     
 
 def perform_compsep(
@@ -291,15 +266,6 @@ def perform_compsep(
     assert 'beta_dust' in first_guess_params or 'beta_dust' in fixed_params, "First guess parameters must contain 'beta_dust'."
     assert 'beta_pl' in first_guess_params or 'beta_pl' in fixed_params, "First guess parameters must contain 'beta_pl'."
     assert isinstance(sky_map, (Stokes, ArrayLike)), "Sky map must be a Stokes object or a ndarray."
-
-    boolean_expression_1 = not(use_preconditioner_diag != use_preconditioner_pinv) and use_preconditioner_pinv
-    boolean_expression_2 = not(use_preconditioner_pinv != use_preconditioner_qr) and use_preconditioner_qr
-    boolean_expression_3 = not(use_preconditioner_diag != use_preconditioner_qr) and use_preconditioner_qr
-    boolean_expression = boolean_expression_1 or boolean_expression_2 or boolean_expression_3
-    # assert not(boolean_expression or (use_preconditioner_diag == use_preconditioner_pinv == use_preconditioner_qr == False)), "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, or use_preconditioner_qr) can be used at a time and set to True."
-    # assert (use_preconditioner_diag != use_preconditioner_pinv) or (use_preconditioner_pinv == False), "Only one type of preconditioner (use_preconditioner_diag or use_preconditioner_pinv) can be used at a time."
-    if use_preconditioner_pinv:
-        assert (matrix_precond is not None), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
     
     if dictionary_parameters_minimization['tol'] < dictionary_parameters_CG['tol_CG'] and do_minimization:
         warnings.warn("The tolerance for the minimization is smaller than the tolerance for the conjugate gradient solver. This might lead to suboptimal results.")
@@ -358,7 +324,7 @@ def perform_compsep(
 
     # Prepare the in_structure of the upcoming operators: component maps are (n_stokes, n_pix),
     # frequency maps are (n_stokes, n_freq, n_pix)
-    in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
+    structure_sed = sky_map.structure_for((sky_map.shape[1],))
     invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
 
 
@@ -372,32 +338,11 @@ def perform_compsep(
     if central_freq_op is None:
         central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
 
-    # elif use_preconditioner_qr:
-    #     logger.warning("The QR decomposition assumes that the central block central_freq_op must be N_{diag}^{1/2} O^T N^{-1} O N_{diag}^{1/2}, so it will be multiplied by the square root of the inverse noise covariance on both sides.")
-    #     logger.warning("If the central_freq_op was not modified as mentioned, the behaviour of the function must be modified.")
-
-    #     invN_sqrt = get_diagonal_operator_from_stokes_maps(jnp.sqrt(invN_matrix_nested), sky_map.structure)
-    #     central_freq_op = invN_sqrt @ central_freq_op @ invN_sqrt
-
     if indices_freq_not_filtered is not None:
         assert np.isin(indices_freq_not_filtered, np.arange(frequencies.size)).all(), "The indices of frequencies not filtered must be in the range of the number of frequencies."
 
         logger.warning(f"Not computing eigenspectra for frequencies indices {indices_freq_not_filtered}, corresponding to frequencies {[frequencies[i] for i in indices_freq_not_filtered]} ")
         indices_freq_not_filtered = np.array(indices_freq_not_filtered, dtype=int)
-
-    if use_preconditioner_qr or use_preconditioner_svd_test:
-        prefactor_pixel_weight_A = jnp.ones_like(invN_matrix_nested)
-        prefactor_pixel_weight_A = prefactor_pixel_weight_A.at[indices_freq_not_filtered].set(
-            jnp.sqrt(invN_matrix_nested[indices_freq_not_filtered])
-        )
-
-        inverse_prefactor_pixel_weight_A = jnp.ones_like(invN_matrix_nested)
-        inverse_prefactor_pixel_weight_A = inverse_prefactor_pixel_weight_A.at[indices_freq_not_filtered].set(
-            1.0 / jnp.sqrt(invN_matrix_nested[indices_freq_not_filtered])
-        )
-
-        operator_inverse_prefactor = get_diagonal_operator_from_stokes_maps(inverse_prefactor_pixel_weight_A, sky_map.structure)
-
 
     # Precompute part of the right-hand side of the CG equation
     logger.info("Precomputing the right-hand side of the CG equation . . .")
@@ -405,238 +350,47 @@ def perform_compsep(
     ONd.q.block_until_ready()
     logger.info("Right-hand side of the CG equation precomputed!")
 
-    if matrix_precond is None:
-        central_matrix_precond = jnp.copy(invN_matrix_nested)
+    # if use_preconditioner_diag and matrix_precond is not None and matrix_precond.shape[-1] == binary_mask.size:
+    #     logger.info("Using diag obsmat matrices")
+    #     matrix_precond = matrix_precond[..., pixels_to_retain_nested]
 
-        if use_preconditioner_qr or use_preconditioner_svd_test:
-            logger.info("Using QR decomposition for the preconditioner computation without a preconditioner matrix provided")
-            central_operator_precond = IdentityOperator(in_structure=sky_map.structure)
-
-    elif use_preconditioner_diag:        
-        logger.info("Using diagonal preconditioner")
-        if matrix_precond.shape[-1] == binary_mask.size:
-            logger.info("Using diag obsmat matrices")
-            matrix_precond = matrix_precond[..., pixels_to_retain_nested]
-        central_matrix_precond = jnp.einsum('fsp,fsp,fsp->fsp', matrix_precond, invN_matrix_nested, matrix_precond)
-
-    elif use_preconditioner_pinv:
-        logger.info("Using pseudo-inverse preconditioner with a preconditioner matrix provided")
-        assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
-
-        assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
-
-        central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
-    
-    elif use_preconditioner_qr:
-        logger.info("Using QR decomposition for the preconditioner computation with a preconditioner matrix provided")
-        assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
-
-        assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
-
-        # add prefactor_pixel_weight_A
-
-        central_operator_precond = operator_inverse_prefactor @ get_dense_furax_operator_from_freq_array(matrix_precond) @ operator_inverse_prefactor
-
-        
-    
-    elif use_preconditioner_svd_test:
-        logger.info("Using SVD decomposition test for the preconditioner computation with a preconditioner matrix provided")
-        assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
-
-        assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
-        
-
-        central_operator_precond = operator_inverse_prefactor @ get_dense_furax_operator_from_freq_array(matrix_precond) @ operator_inverse_prefactor
-
+    preconditioner = get_preconditioner(
+        use_preconditioner_diag=use_preconditioner_diag,
+        use_preconditioner_pinv=use_preconditioner_pinv,
+        use_preconditioner_qr=use_preconditioner_qr,
+        use_preconditioner_svd_test=use_preconditioner_svd_test,
+        invN_matrix=invN_matrix_nested, 
+        matrix_precond=matrix_precond,
+        indices_freq_not_filtered=indices_freq_not_filtered, 
+        structure_sed=structure_sed,
+        structure_sky_map=sky_map.structure,
+        patch_indices=patch_indices,
+    )
         
     number_components = 3 # CMB, dust, synchrotron
     n_pix = pixels_to_retain_nested.size
 
-    # @equinox.filter_jit
-    def get_A_s_AOND(params, right_member=ONd):
-        """
-            Compute the log-proba given a set of parameters 
-        """
-
-        # Select parameters which are to be estimated 
-        parameters_dict = dict()
-        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']:
-            if param_name in params:
-                parameters_dict[param_name] = params[param_name]
-            else:
-                parameters_dict[param_name] = fixed_params[param_name]
-
-        # Mixing matrix operator
-        A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
-
-        # Full right-hand side of the CG equation
-        AOND = A.T(right_member)
-
-        preconditioner = None
-        if use_preconditioner_diag:
-            logger.info("Using diagonal preconditioner")
-            matrix_A = get_array_from_A(A, n_pix)
-
-            # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
-            preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fcp,fsp,fkp->psck', matrix_A, central_matrix_precond, matrix_A)).T)
-
-            # Prepare the preconditioner operator
-            preconditioner = get_preconditioner(
-                preconditioner_matrix, 
-                in_structure=in_structure_sed
-            )
-        if use_preconditioner_pinv or use_preconditioner_qr or use_preconditioner_svd_test:
-            logger.info("Using pseudo-inverse preconditioner")
-            matrix_A = get_array_from_A(A, n_pix)
-
-            if use_preconditioner_pinv:
-                logger.info("Using pseudo-inverse preconditioner for the preconditioner computation")
-                if patch_indices is None:
-                    logger.info("Assuming no patches for the preconditioner computation")
-                    matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
-                else:
-                    logger.info("Assuming patches for the preconditioner computation")
-                    matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
-
-                pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
-                        '...ba,...b,...cb->...ac', 
-                        matrix_vh, 
-                        jnp.where(matrix_s!=0, 1./matrix_s, 0.),
-                        matrix_u,
-                    )
-                )
-
-                pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
-
-            elif use_preconditioner_qr:
-                logger.info("Using QR decomposition for the preconditioner computation")
-
-                # B = N^{-1/2} A for each (stokes, pixel), shape (n_stokes, n_pix, n_freq, n_comp)
-                weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, prefactor_pixel_weight_A)
-                q_matrix, r_matrix = jnp.linalg.qr(weighted_A)
-
-                pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
-                    '...ab,...cb->...ac',
-                    jnp.linalg.pinv(r_matrix),
-                    q_matrix
-                ))
-
-                pseudo_inverse_A_op = get_A_from_array_stokes(
-                    jnp.einsum('spcf->csfp', pseudo_inverse_B),
-                    in_structure_sed
-                )
-            elif use_preconditioner_svd_test:
-                logger.info("Using SVD decomposition test for the preconditioner computation")
-
-                weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, prefactor_pixel_weight_A)
-                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(weighted_A, full_matrices=False)
-
-                pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
-                        '...ba,...b,...cb->...ac', 
-                        matrix_vh, 
-                        jnp.where(matrix_s!=0, 1./matrix_s, 0.),
-                        matrix_u,
-                    )
-                )
-
-                pseudo_inverse_A_op = get_A_from_array_stokes(
-                    jnp.einsum('spcf->csfp', pseudo_inverse_B),
-                    in_structure_sed
-                )
-
-
-            # With central_operator_precond = Id: preconditioner = pinv(B) pinv(B)^T = (B^T B)^{-1} = (A^T N^{-1} A)^{-1}
-            preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
-
-        diagonal_central_term = (A.T @ central_freq_op @ A).I(
-            solver=lx.CG(
-                rtol=dictionary_parameters_CG['tol_CG'], 
-                atol=dictionary_parameters_CG['tol_CG'], 
-                max_steps=dictionary_parameters_CG['max_steps_CG']
-            ), 
-            preconditioner=preconditioner,
-            callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
-        )
-        first_central_term =  diagonal_central_term(AOND)
-
-        return A, first_central_term, AOND, diagonal_central_term
-
-    @equinox.filter_custom_jvp
-    def spectral_likelihood_custom_gradient(params):
-        """
-            Compute the log-proba given a set of parameters 
-        """
-
-        # Select parameters which are to be estimated 
-        parameters_dict = dict()
-        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']:
-            if param_name in params:
-                parameters_dict[param_name] = params[param_name]
-            else:
-                parameters_dict[param_name] = fixed_params[param_name]
-
-        _, map_s, AOND, _ = get_A_s_AOND(parameters_dict)
-
-        logL = -dot_2(AOND, map_s)
-
-        # Compute the negative log-likelihood
-        return logL
-
-    @spectral_likelihood_custom_gradient.def_jvp
-    def custom_gradient(primals, tangents):
-        """
-        Custom JVP rule for the perturbative_negative_log_prob function.
-        """
-        params, = primals
-        beta_tau, = tangents
-
-        # Select parameters which are to be estimated 
-        parameters_dict = dict()
-        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']:
-            if param_name in params:
-                parameters_dict[param_name] = params[param_name]
-            else:
-                parameters_dict[param_name] = fixed_params[param_name]
-
-        A, map_s, AOND, _ = get_A_s_AOND(parameters_dict)
-
-        logL = -dot_2(AOND, map_s)
-
-        A_deriv = create_MixingMatrixOperator_deriv(
-            frequencies, 
-            parameters_dict, 
-            in_structure_sed, 
-            dust_nu0=dust_nu0, 
-            synchrotron_nu0=synchrotron_nu0, 
-            patch_indices=patch_indices
-        )
-
-        left_hand_term = ONd - (central_freq_op @ A)(map_s)
-
-        keys_params = params.keys()
-
-        final_grad_log = 0
-        for key in keys_params:
-            patch_key = f'{key}_patches'
-            if patch_indices is not None and patch_indices.get(patch_key) is not None:
-                raise Exception("Multi-patch version not validated")
-            
-                # Per-patch parameter: weight each pixel by the tangent of its patch
-                tangent_per_pixel = beta_tau[key][patch_indices[patch_key]]
-                A_deriv_tangent = get_A_from_array(
-                    jnp.moveaxis(get_array_from_A(A_deriv[key], n_pix) * tangent_per_pixel, 1, 0),
-                    in_structure_sed
-                )
-                final_grad_log += -2*dot_2(A_deriv_tangent(map_s), left_hand_term)
-            else:
-                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
-        return logL, final_grad_log
+    likelihood_object = Likelihood(
+        frequencies = frequencies,
+        fixed_params = fixed_params,
+        structure_sed = structure_sed,
+        central_freq_op = central_freq_op,
+        right_member = ONd,
+        dictionary_parameters_CG = dictionary_parameters_CG,
+        dictionary_parameters_minimization = dictionary_parameters_minimization,
+        preconditioner = preconditioner,
+        helpers_mixing_matrix = {
+            'dust_nu0': dust_nu0,
+            'synchrotron_nu0': synchrotron_nu0,
+            'patch_indices': patch_indices
+        }
+    )
 
     if do_minimization:
         logger.info("Launching minimization!!")
         output_params, output_state = minimize(
             init_params=first_guess_params, 
-            fn=spectral_likelihood_custom_gradient, 
+            fn=likelihood_object.get_spectral_likelihood(), 
             max_iter=dictionary_parameters_minimization['max_iter'], 
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
@@ -654,7 +408,7 @@ def perform_compsep(
         output_params = first_guess_params
         number_iterations = 0
 
-    A_maxL, final_maps = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
+    A_maxL, final_maps = likelihood_object.get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
 
     A_maxL_array = np.asarray(get_array_from_A(A_maxL, n_pix))
 
@@ -667,7 +421,7 @@ def perform_compsep(
 
     def W_maxL(input_map):
             
-        output_map_truncated = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
+        output_map_truncated = likelihood_object.get_A_s_AOND(output_params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
 
         output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
@@ -680,7 +434,7 @@ def perform_compsep(
 
     def W_params(params, input_map):
 
-        output_map_truncated = get_A_s_AOND(params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
+        output_map_truncated = likelihood_object.get_A_s_AOND(params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
 
         output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 

@@ -2,10 +2,13 @@ import logging
 import os
 
 from megabuster.compsep import *
-from megabuster.io import *
-from megabuster.precomputations import *
-from megabuster.tools import *
 from megabuster.helper import *
+from megabuster.io import *
+from megabuster.likelihood import *
+from megabuster.mixingmatrix import *
+from megabuster.precomputations import *
+from megabuster.preconditioner import *
+from megabuster.tools import *
 
 
 

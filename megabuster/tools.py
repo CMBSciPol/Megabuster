@@ -7,11 +7,11 @@ from furax.core import BlockColumnOperator, BlockRowOperator, BroadcastDiagonalO
 from furax.obs.stokes import StokesQU
 
 __all__ = [
+    'build_furax_preconditioner',
     'get_maps_from_Stokes',
     'get_diagonal_operator_from_stokes_maps',
     'get_A_from_array',
     'get_array_from_A',
-    'get_preconditioner',
     'get_healpix_indices_patch_from_mask',
     'get_A_from_array_stokes'
 ]
@@ -49,7 +49,7 @@ def get_diagonal_operator_from_stokes_maps(stokes_maps, in_structure):
     # Move the Stokes axis in front, as in the StokesQU backing array
     return DiagonalOperator(jnp.moveaxis(jnp.asarray(stokes_maps), -2, 0), in_structure=in_structure)
 
-def get_preconditioner(preconditioner_matrix, in_structure):
+def build_furax_preconditioner(preconditioner_matrix, in_structure):
     """
     Given a preconditioner matrix in terms of components, return a BlockColumnOperator that
     applies the preconditioner to a dictionary of StokesQU component maps.
@@ -88,7 +88,7 @@ def get_dense_furax_operator_from_freq_array(matrix):
     in_structure = StokesQU.structure_for((matrix.shape[0], matrix.shape[-1]), dtype=matrix.dtype)
     return DenseBlockDiagonalOperator(matrix, in_structure=in_structure, subscripts='fstqp,tfp->sfq')
 
-def get_A_from_array(matrix_A, in_structure_sed):
+def get_A_from_array(matrix_A, structure_sed):
     """
     Build a mixing matrix operator from an array of shape (n_comp, n_freq) or (n_comp, n_freq, n_pix),
     applied as the furax SED operators.
@@ -103,7 +103,7 @@ def get_A_from_array(matrix_A, in_structure_sed):
                 matrix_to_build[num_cpt, ...],
                 axis_destination=(-2, -1),
                 insert_axes=-2,
-                in_structure=in_structure_sed,
+                in_structure=structure_sed,
             ) for num_cpt, component in enumerate(['cmb', 'dust', 'synchrotron'])
         }
     )
@@ -120,19 +120,16 @@ def get_array_from_A(A, n_pix, components=('cmb', 'dust', 'synchrotron')):
     )
 
 
-def get_A_from_array_stokes(matrix_A, in_structure_sed, components=('cmb', 'dust', 'synchrotron')):
+def get_A_from_array_stokes(matrix_A, structure_sed, components=('cmb', 'dust', 'synchrotron')):
     """
     Build a mixing-matrix-like operator (components -> frequencies) whose coefficients
     depend on the Stokes parameter, unlike `megabuster.tools.get_A_from_array`.
 
-    FIX (QR preconditioner): this is needed because the QR pseudo-inverse is computed from
-    N^{-1/2} A, and N differs between Q and U, so its coefficients differ between Q and U.
-    It would naturally belong in megabuster/tools.py.
 
     Parameters
     ----------
     matrix_A : array of shape (n_comp, n_stokes, n_freq, n_pix)
-    in_structure_sed : StokesQU structure of a component map, of shape (n_stokes, n_pix).
+    structure_sed : StokesQU structure of a component map, of shape (n_stokes, n_pix).
 
     Returns
     -------
@@ -146,7 +143,7 @@ def get_A_from_array_stokes(matrix_A, in_structure_sed, components=('cmb', 'dust
                 matrix_A[num_cpt],
                 axis_destination=(-3, -2, -1),
                 insert_axes=-2,
-                in_structure=in_structure_sed,
+                in_structure=structure_sed,
             ) for num_cpt, component in enumerate(components)
         }
     )

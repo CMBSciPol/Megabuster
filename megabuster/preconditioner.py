@@ -1,0 +1,272 @@
+import logging
+import numpy as np
+import jax
+import jax.numpy as jnp
+import jax.lax
+from furax.core import IdentityOperator
+
+from megabuster.tools import (
+    build_furax_preconditioner,
+    get_array_from_A,
+    get_A_from_array,
+    get_A_from_array_stokes,
+    get_dense_furax_operator_from_freq_array,
+    get_diagonal_operator_from_stokes_maps,
+)
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'get_preconditioner',
+    'PreconditionerNone',
+    'PreconditionerDiagonal',
+    'PreconditionerSVD',
+    'PreconditionerQR',
+    'PreconditionerSVD_test'
+]
+
+
+def _check_matrix_precond_dense(matrix_precond, n_freq, n_stokes):
+    """Check the shape (n_freq, n_stokes, n_stokes, n_pix, n_pix) of a dense central preconditioner matrix."""
+
+    assert matrix_precond.shape[:3] == (n_freq, n_stokes, n_stokes), "If we use a preconditioner based on a precomputed matrix, it must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
+    assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
+    assert matrix_precond.ndim == 5, "Central preconditioner matrix must have 5 dimensions (n_freq, n_stokes, n_stokes, n_pix, n_pix)."
+
+
+def _get_frequency_weights(invN_matrix, indices_freq_not_filtered):
+    """
+    Weights W applied to the mixing matrix, B = W A,
+    with W = N^{-1/2} for the frequencies not filtered and 1 for the others, and their inverse.
+
+    """
+    n_freq = invN_matrix.shape[0]
+    if indices_freq_not_filtered is None:
+        indices_freq_not_filtered = np.arange(n_freq)
+
+    sqrt_invN = jnp.sqrt(jnp.asarray(invN_matrix)[indices_freq_not_filtered])
+
+    weights = jnp.ones_like(invN_matrix).at[indices_freq_not_filtered].set(sqrt_invN)
+    inverse_weights = jnp.ones_like(invN_matrix).at[indices_freq_not_filtered].set(
+        jnp.where(sqrt_invN > 0, 1.0 / jnp.where(sqrt_invN > 0, sqrt_invN, 1.0), 0.0)
+    )
+    return weights, inverse_weights
+
+
+class PreconditionerNone:
+    def __init__(self, *args, **kwargs):
+        logger.warning("Setting up no preconditioner")
+        
+    def get(self, *args, **kwargs):
+        logger.warning("Using no preconditioner")
+        return None
+
+
+class PreconditionerDiagonal:
+    def __init__(self, invN_matrix, structure_sed, *args, **kwargs):
+        logger.info("Setting up diagonal preconditioner")
+        self.central_matrix_precond = jnp.array(invN_matrix)
+        self.n_pix = invN_matrix.shape[-1]
+
+        self.structure_sed = structure_sed
+
+    def get(self, A):
+        logger.info("Using diagonal preconditioner")
+        
+        matrix_A = get_array_from_A(A, self.n_pix)
+
+        # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
+        preconditioner_matrix = jax.lax.stop_gradient(
+            jnp.linalg.pinv(
+                jnp.einsum('fcp,fsp,fkp->psck', matrix_A, self.central_matrix_precond, matrix_A)
+            ).T
+        )
+
+        # Prepare the preconditioner operator
+        return build_furax_preconditioner(
+            preconditioner_matrix, 
+            in_structure=self.structure_sed
+        )
+
+class PreconditionerSVD:
+    def __init__(self, matrix_precond, structure_sed, invN_matrix, patch_indices=None, *args, **kwargs):
+        logger.info("Setting up pseudo-inverse preconditioner")
+        
+        self.structure_sed = structure_sed
+
+        assert (matrix_precond is not None), "If the pseudo-inverse preconditioner (use_preconditioner_pinv) is set to True, then matrix_precond must be provided."
+
+        _check_matrix_precond_dense(matrix_precond, n_freq=invN_matrix.shape[0], n_stokes=invN_matrix.shape[1])
+
+        self.n_pix = matrix_precond.shape[-1]
+
+        self.patch_indices = patch_indices
+
+        self.central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
+
+    def get(self, A):
+        logger.info("Using pseudo-inverse preconditioner for the preconditioner computation")
+        
+        matrix_A = get_array_from_A(A, self.n_pix)
+        
+        if self.patch_indices is None:
+            matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
+        else:
+            matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
+
+        pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
+                '...ba,...b,...cb->...ac', 
+                matrix_vh, 
+                jnp.where(matrix_s!=0, 1./matrix_s, 0.),
+                matrix_u,
+            )
+        )
+
+        pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, self.structure_sed)
+
+        return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
+    
+
+class PreconditionerQR:
+    def __init__(
+        self, 
+        invN_matrix, 
+        matrix_precond,
+        indices_freq_not_filtered, 
+        structure_sed,
+        structure_sky_map,
+        *args,
+        **kwargs
+    ):
+        logger.info("Setting up QR decomposition preconditioner")
+
+        prefactor_pixel_weight_A, inverse_prefactor_pixel_weight_A = _get_frequency_weights(invN_matrix, indices_freq_not_filtered)
+
+        self.prefactor_pixel_weight_A = prefactor_pixel_weight_A
+        self.structure_sed = structure_sed
+
+        self.n_pix = invN_matrix.shape[-1]
+
+        if matrix_precond is not None:
+            _check_matrix_precond_dense(matrix_precond, n_freq=invN_matrix.shape[0], n_stokes=invN_matrix.shape[1])
+
+            operator_inverse_prefactor = get_diagonal_operator_from_stokes_maps(
+                inverse_prefactor_pixel_weight_A,
+                structure_sky_map
+            )
+            self.central_operator_precond = operator_inverse_prefactor @ get_dense_furax_operator_from_freq_array(matrix_precond) @ operator_inverse_prefactor
+        else:
+            self.central_operator_precond = IdentityOperator(in_structure=structure_sky_map)
+
+
+    def get(self, A):
+        logger.info("Using QR decomposition for the preconditioner computation")
+
+        matrix_A = get_array_from_A(A, self.n_pix)
+
+        # B = N^{-1/2} A for each (stokes, pixel), shape (n_stokes, n_pix, n_freq, n_comp)
+        weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, self.prefactor_pixel_weight_A)
+        q_matrix, r_matrix = jnp.linalg.qr(weighted_A)
+
+        pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
+            '...ab,...cb->...ac',
+            jnp.linalg.pinv(r_matrix),
+            q_matrix
+        ))
+
+        pseudo_inverse_A_op = get_A_from_array_stokes(
+            jnp.einsum('spcf->csfp', pseudo_inverse_B),
+            self.structure_sed
+        )
+
+        return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
+
+
+class PreconditionerSVD_test:
+    def __init__(
+        self, 
+        invN_matrix, 
+        matrix_precond,
+        indices_freq_not_filtered, 
+        structure_sed,
+        structure_sky_map,
+        *args,
+        **kwargs
+    ):
+        logger.info("Setting up SVD decomposition test preconditioner")
+
+        prefactor_pixel_weight_A, inverse_prefactor_pixel_weight_A = _get_frequency_weights(invN_matrix, indices_freq_not_filtered)
+
+        self.prefactor_pixel_weight_A = prefactor_pixel_weight_A
+        self.structure_sed = structure_sed
+
+        self.n_pix = invN_matrix.shape[-1]
+
+        if matrix_precond is not None:
+            _check_matrix_precond_dense(matrix_precond, n_freq=invN_matrix.shape[0], n_stokes=invN_matrix.shape[1])
+
+            operator_inverse_prefactor = get_diagonal_operator_from_stokes_maps(
+                inverse_prefactor_pixel_weight_A,
+                structure_sky_map
+            )
+            self.central_operator_precond = operator_inverse_prefactor @ get_dense_furax_operator_from_freq_array(matrix_precond) @ operator_inverse_prefactor
+        else:
+            self.central_operator_precond = IdentityOperator(in_structure=structure_sky_map)
+
+    def get(self, A):
+        logger.info("Using SVD decomposition test for the preconditioner computation")
+
+        matrix_A = get_array_from_A(A, self.n_pix)
+
+        weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, self.prefactor_pixel_weight_A)
+        matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(weighted_A, full_matrices=False)
+
+        pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
+                '...ba,...b,...cb->...ac', 
+                matrix_vh, 
+                jnp.where(matrix_s!=0, 1./matrix_s, 0.),
+                matrix_u,
+            )
+        )
+
+        pseudo_inverse_A_op = get_A_from_array_stokes(
+            jnp.einsum('spcf->csfp', pseudo_inverse_B),
+            self.structure_sed
+        )
+
+        return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
+
+def get_preconditioner(
+    use_preconditioner_diag: bool = False,
+    use_preconditioner_pinv: bool = False,
+    use_preconditioner_qr: bool = False,
+    use_preconditioner_svd_test: bool = False,
+    *args,
+    **kwargs
+):
+
+    number_preconditioners = sum(bool(flag) for flag in [use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr, use_preconditioner_svd_test])
+    assert number_preconditioners <= 1, "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr or use_preconditioner_svd_test) can be set to True."
+
+    if use_preconditioner_diag:
+        return PreconditionerDiagonal(
+            *args,
+            **kwargs
+        )
+    elif use_preconditioner_pinv:
+        return PreconditionerSVD(
+            *args,
+            **kwargs
+        )
+    elif use_preconditioner_qr:
+        return PreconditionerQR(
+            *args,
+            **kwargs
+        )
+    elif use_preconditioner_svd_test:
+        return PreconditionerSVD_test(
+            *args,
+            **kwargs
+        )
+    else:
+        return PreconditionerNone()

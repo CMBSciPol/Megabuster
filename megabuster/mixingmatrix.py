@@ -16,7 +16,7 @@ single_patch_indices = {
     'beta_dust_patches': None,
     'beta_pl_patches': None,
 }
-def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=150.0, patch_indices=None):
+def create_MixingMatrixOperator(frequencies, parameters_dict, structure_sed, dust_nu0=150.0, synchrotron_nu0=150.0, patch_indices=None):
     """
     Create the mixing matrix operator using the provided parameters.
 
@@ -27,7 +27,7 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
     parameters_dict: dict
         Dictionary of parameters. Must contain the following
         keys: 'temp_dust', 'beta_dust', and 'beta_pl'.
-    in_structure_sed: equinox.Structure
+    structure_sed: equinox.Structure
         Structure to be provided to the SED object.
     dust_nu0: float (optional)
         Dust reference frequency parameter in GHz. Default is 150.0 GHz.
@@ -43,7 +43,7 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
     if patch_indices is None:
         patch_indices = single_patch_indices
 
-    cmb = CMBOperator(frequencies, in_structure=in_structure_sed)
+    cmb = CMBOperator(frequencies, in_structure=structure_sed)
     dust = DustOperator(
         frequencies,
         frequency0=dust_nu0,
@@ -51,14 +51,14 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
         beta=parameters_dict['beta_dust'],
         temperature_patch_indices=patch_indices['temp_dust_patches'],
         beta_patch_indices=patch_indices['beta_dust_patches'],
-        in_structure=in_structure_sed
+        in_structure=structure_sed
     )
     synchrotron = SynchrotronOperator(
         frequencies, 
         frequency0=synchrotron_nu0, 
         beta_pl=parameters_dict['beta_pl'], 
         beta_pl_patch_indices=patch_indices['beta_pl_patches'],
-        in_structure=in_structure_sed
+        in_structure=structure_sed
     )
 
     # Mixing matrix operator
@@ -67,7 +67,7 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
 def create_MixingMatrixOperator_deriv(
         frequencies, 
         parameters_dict, 
-        in_structure_sed, 
+        structure_sed, 
         dust_nu0=150.0, 
         synchrotron_nu0=20.0, 
         patch_indices=None
@@ -82,7 +82,7 @@ def create_MixingMatrixOperator_deriv(
     parameters_dict: dict
         Dictionary of parameters. Must contain the following
         keys: 'temp_dust', 'beta_dust', and 'beta_pl'.
-    in_structure_sed: equinox.Structure
+    structure_sed: equinox.Structure
         Structure to be provided to the SED object.
     dust_nu0: float (optional)
         Dust reference frequency parameter in GHz. Default is 150.0 GHz.
@@ -101,7 +101,7 @@ def create_MixingMatrixOperator_deriv(
 
     cmb_derivative = CMBDerivOperator(
         frequencies=frequencies, 
-        in_structure=in_structure_sed,
+        in_structure=structure_sed,
     )
     dust_derivative = DustDerivOperator(
         frequencies,
@@ -110,14 +110,14 @@ def create_MixingMatrixOperator_deriv(
         beta=parameters_dict['beta_dust'],
         temperature_patch_indices=patch_indices['temp_dust_patches'],
         beta_patch_indices=patch_indices['beta_dust_patches'],
-        in_structure=in_structure_sed,
+        in_structure=structure_sed,
     )
     synchrotron_derivative = SynchrotronDerivOperator(
         frequencies, 
         frequency0=synchrotron_nu0, 
         beta_pl=parameters_dict['beta_pl'], 
         beta_pl_patch_indices=patch_indices['beta_pl_patches'],
-        in_structure=in_structure_sed
+        in_structure=structure_sed
     )
 
     # Mixing matrix operator
