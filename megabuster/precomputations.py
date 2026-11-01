@@ -51,7 +51,6 @@ def compute_eigenspectrum_from_matrices(
     path_output,
     list_name_output,
     threshold=1e-20,
-    multiply_N_sqrt=False,
     indices_freq_not_filtered=None
 ):
     """ Compute the eigenspectrum of the matrices O^T N^{-1} O for each frequency,
@@ -87,9 +86,6 @@ def compute_eigenspectrum_from_matrices(
             eigvals = np.ones(nstokes * n_pix_masked)
             eigvecs = np.eye(nstokes * n_pix_masked)
 
-            if not multiply_N_sqrt:
-                eigvals *= hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel()
-
             jnp.savez(path_save, eigvals=eigvals, eigvecs=eigvecs)
             continue
 
@@ -99,24 +95,13 @@ def compute_eigenspectrum_from_matrices(
         N_nested_sqrt = jnp.sqrt(np.where(invN_nested != 0, 1/invN_nested, 0))
 
         time_start = time.time()
-        if not multiply_N_sqrt:
-            logger.info("Computing eigenspectrum without multiplying by N^1/2...")
-            array_to_eigen = contract(
-                'ab,b,bc->ac', 
-                obsmat_array.T, 
-                hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel(), 
-                obsmat_array
-            )
-        else:
-            logger.info("Computing eigenspectrum and multiplying by N^1/2...")
-            array_to_eigen = jnp.array(contract(
-                'a,ab,b,bc,c->ac', 
-                N_nested_sqrt,
-                obsmat_array.T, 
-                invN_nested, 
-                obsmat_array,
-                N_nested_sqrt
-            ))
+        array_to_eigen = contract(
+            'ab,b,bc->ac', 
+            obsmat_array.T, 
+            hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel(), 
+            obsmat_array
+        )
+
         array_to_eigen.block_until_ready()
         logger.info(f"Finish computation in {time.time()-time_start:.2f} seconds")
         
