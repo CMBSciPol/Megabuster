@@ -289,6 +289,8 @@ def perform_compsep(
         binary_mask = np.ones(invN_matrix.shape[-1])
     
     if patch_indices is not None:
+        raise ValueError("Patch indices are not yet implemented. Please set patch_indices to None.")
+
         assert np.all(np.isin(list(patch_indices.keys()), ['temp_dust_patches', 'beta_dust_patches', 'beta_pl_patches'])), "Single patch indices must be a dictionary with keys 'temp_dust_patches', 'beta_dust_patches', and 'beta_pl_patches'."
         for key_patch in ['temp_dust_patches', 'beta_dust_patches', 'beta_pl_patches']:
             if key_patch not in patch_indices:
