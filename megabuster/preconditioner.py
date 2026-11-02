@@ -3,7 +3,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.lax
-from furax.core import IdentityOperator
+from furax.core import IdentityOperator, DenseBlockDiagonalOperator
 
 from megabuster.tools import (
     build_furax_preconditioner,
@@ -323,6 +323,100 @@ class PreconditionerSVD_test:
 
         return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
 
+class PreconditionerCommonBasis:
+    """
+    Preconditioner for M = sum_f A_f^T C_f A_f, with C_f = O_f^T N_f^-1 O_f the central block of
+    frequency f (dense, given as matrix_central = load_matrix_precond(..., power_diagonal=1)).
+
+        P = V [sum_f a_f a_f^T lambda_{f,k}]^-1 V^T,   lambda_{f,k} = (V^T C_f V)_kk
+
+    i.e. all the (whitened) C_f are approximated by their diagonal in a common orthonormal basis V, where M is
+    then block diagonal with one 3x3 block per mode k, inverted exactly. 
+
+    common_filtered_eigenvector: V, e.g. the precomputed eigenvectors of C_f for one filtered frequency
+        (no new eigendecomposition). If None, V is the eigenbasis of sum_f C~_f / tr(C~_f), C~_f = W^-1 C_f W^-1.
+      
+    Built with furax operators: P = V_op @ B^-1_op @ V_op.T @, with V_op.T a DenseBlockDiagonalOperator
+    applying V^T to each component map (the mode index is reshaped as (n_stokes, n_pix)), and B^-1_op the per mode
+    3x3 inverses as a BlockColumnOperator of DiagonalOperators (build_furax_preconditioner, as for the diagonal
+    preconditioner, with modes instead of pixels).
+    """
+
+    components = ('cmb', 'dust', 'synchrotron')
+    ncomponents = len(components)
+
+    def __init__(
+        self, 
+        common_filtered_eigenvector, 
+        matrix_central, 
+        invN_matrix, 
+        structure_sed, 
+        indices_freq_not_filtered=None, 
+        *args, 
+        **kwargs
+    ):
+        logger.info("Setting up common basis preconditioner")
+        assert matrix_central is not None, "The common basis preconditioner needs matrix_central, the dense central blocks C_f (power_diagonal=1)."
+        _check_matrix_precond_dense(matrix_central, n_freq=invN_matrix.shape[0], n_stokes=invN_matrix.shape[1])
+
+        n_freq, n_stokes, _, n_pix, _ = matrix_central.shape
+
+        self.n_stokes = n_stokes
+        self.structure_sed = structure_sed
+        self.n_pix = n_pix
+        
+        n_tot = n_stokes * n_pix
+
+        assert common_filtered_eigenvector is not None, "The common basis preconditioner needs common_filtered_eigenvector, the eigenvectors of one filtered frequency (or of sum_f C~_f / tr(C~_f))."
+        assert common_filtered_eigenvector.shape == (n_stokes * n_pix, n_stokes * n_pix), f"common_filtered_eigenvector must have shape {(n_stokes * n_pix, n_stokes * n_pix)}"
+
+        logger.info("Common basis preconditioner: using the eigenvectors provided")
+        assert common_filtered_eigenvector.shape == (n_tot, n_tot), f"common_filtered_eigenvector must have shape {(n_tot, n_tot)}"
+
+        # lambda_{f,k} = (V^T C~_f V)_{kk}
+        # self.eigenvalues_per_freq = jnp.stack([jnp.sum(common_filtered_eigenvector * (whitened_block(f) @ common_filtered_eigenvector), axis=0) for f in range(n_freq)])
+        common_filtered_eigenvector = common_filtered_eigenvector.reshape(n_stokes, n_pix, n_tot)
+        self.eigenvalues_per_freq = jnp.stack([
+            jnp.einsum(
+                'sak,stab,tbk->k',
+                 common_filtered_eigenvector, 
+                 matrix_central[f], 
+                 common_filtered_eigenvector
+                )
+            for f in range(n_freq)
+        ])
+
+        structure_components = {component: structure_sed for component in self.components}
+        # V^T applied to each component map: y[t, b] = sum_{s, a} V[(s, a), (t, b)] x[s, a]
+        self.operator_eigenvectors_T = DenseBlockDiagonalOperator(
+            common_filtered_eigenvector.reshape(n_stokes, n_pix, n_stokes, n_pix),
+            in_structure=structure_components,
+            subscripts='satb,sa->tb',
+        )
+
+    def get(self, A):
+        logger.info("Using common basis preconditioner")
+
+        matrix_A = get_array_from_A(A, self.n_pix)[..., 0]                 # (n_freq, 3), no patches
+        cov_diagonalized = jnp.einsum('fc,fd,fk->kcd', matrix_A, matrix_A, self.eigenvalues_per_freq)
+        inverse_cov_diagonalized = jax.lax.stop_gradient(jnp.linalg.inv(cov_diagonalized))     # (n_modes, 3, 3)
+
+        operator_inverse_covariance_diag = build_furax_preconditioner(
+            jnp.transpose(inverse_cov_diagonalized, (1, 2, 0)).reshape(
+                self.ncomponents, 
+                self.ncomponents, 
+                self.n_stokes, 
+                self.n_pix
+            ),
+            in_structure=self.structure_sed,
+        )
+        return (
+            self.operator_eigenvectors_T.T
+            @ operator_inverse_covariance_diag
+            @ self.operator_eigenvectors_T
+        )
+
+
 def get_preconditioner(
     use_preconditioner_diag: bool = False,
     use_preconditioner_pinv: bool = False,
@@ -330,10 +424,11 @@ def get_preconditioner(
     use_preconditioner_qr_test: bool = False,
     use_preconditioner_qr_test_pixels: bool = False,
     use_preconditioner_svd_test: bool = False,
+    use_preconditioner_common_basis: bool = False,
     *args,
     **kwargs
 ):
-    list_of_flags = [use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr, use_preconditioner_qr_test, use_preconditioner_qr_test_pixels, use_preconditioner_svd_test]
+    list_of_flags = [use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr, use_preconditioner_qr_test, use_preconditioner_qr_test_pixels, use_preconditioner_svd_test, use_preconditioner_common_basis]
 
     number_preconditioners = sum(bool(flag) for flag in list_of_flags)
     assert number_preconditioners <= 1, "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr or use_preconditioner_svd_test) can be set to True."
@@ -365,6 +460,11 @@ def get_preconditioner(
         )
     elif use_preconditioner_svd_test:
         return PreconditionerSVD_test(
+            *args,
+            **kwargs
+        )
+    elif use_preconditioner_common_basis:
+        return PreconditionerCommonBasis(
             *args,
             **kwargs
         )

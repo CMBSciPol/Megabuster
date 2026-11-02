@@ -4,7 +4,6 @@ import jax
 import jax.numpy as jnp
 import healpy as hp
 from jaxtyping import ArrayLike
-from typing import Callable
 
 from furax.core import IdentityOperator
 from furax.obs.stokes import Stokes
@@ -14,6 +13,7 @@ from furax_cs import minimize, SOLVER_NAMES
 from megabuster.likelihood import Likelihood
 from megabuster.preconditioner import get_preconditioner
 from megabuster.tools import (
+    Results,
     get_diagonal_operator_from_stokes_maps, 
     get_array_from_A,
     get_maps_from_Stokes, 
@@ -23,117 +23,9 @@ from megabuster.tools import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    'Results',
     'perform_compsep',
 ]
 
-class Results(object):
-    """
-    Class to store the results of the component separation.
-    
-    Attributes:
-        x (ArrayLike):
-            Parameters fitted, stored as an array.  
-        s (ArrayLike):
-            Sky map, stored as an array of shape (n_components, n_stokes, n_pixels).
-        W_maxL (Callable):
-            Function representing the mixing matrix operator at the parameters fitted.
-        success (bool):
-            Boolean indicating whether the optimization was successful.
-    """
-    params: list[str] = ['temp_dust', 'beta_dust', 'beta_pl']
-    x: ArrayLike # parameters fitted
-    s: ArrayLike # sky map
-    W_maxL: Callable # W function at the parameters fitted
-    A_maxL: ArrayLike # Mixing matrix operator at the parameters fitted
-    success: bool # success of the optimization
-    message: str
-    W_params: Callable = None # Function to apply the mixing matrix operator at the parameters fitted
-    
-    def __init__(self):
-        self.params = None
-        self.x = None
-        self.s = None
-        self.W_maxL = None
-        self.A_maxL = None
-        self.success = False
-        self.message = "No optimization performed yet."
-        self.W_params = None
-
-    @classmethod
-    def from_compsep_results(
-        cls, 
-        name_params,
-        final_params, 
-        final_W_func, 
-        final_A_maxL,
-        final_maps, 
-        number_iterations, 
-        max_iter, 
-        ordering_parameter=['beta_dust', 'beta_pl'], 
-        ordering_component=['cmb', 'dust', 'synchrotron'],
-        W_params=None
-):
-        """
-        Create an instance of Results from the component separation results.
-        
-        Args:
-            final_params (dict): 
-                Final parameters after optimization.
-            final_W_func (function): Function representing the final mixing matrix operator.
-            final_maps (Stokes or ndarray): Final sky map.
-            number_iterations (int): Number of iterations performed.
-            max_iter (int): Maximum number of iterations allowed.
-        
-        Returns:
-            Results: An instance of Results containing the final parameters, W function, and success status.
-        """
-        res = cls()
-        res.params = name_params
-        res.x = np.array([final_params[key] for key in ordering_parameter])
-
-        def final_W(input_maps):
-            """
-            Function to apply the final mixing matrix operator to the input maps.
-            """
-
-            assert input_maps.ndim == 3, "Input maps must have shape (n_frequencies, n_stokes, n_pixels)."
-            assert input_maps.shape[1] >= 2, "Input maps must contain at least Q and U Stokes parameters."
-            
-
-            input_maps_stokes = Stokes.from_stokes(
-                q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                u=hp.reorder(input_maps[:,-1,:],r2n=True)
-            )
-            return final_W_func(input_maps_stokes)
-        
-        if W_params is not None:
-            def final_W_params(params, input_maps):
-                """
-                Function to apply the final mixing matrix operator to the input maps.
-                """
-
-                assert input_maps.ndim == 3, "Input maps must have shape (n_frequencies, n_stokes, n_pixels)."
-                assert input_maps.shape[1] >= 2, "Input maps must contain at least Q and U Stokes parameters."
-                
-
-                input_maps_stokes = Stokes.from_stokes(
-                    q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                    u=hp.reorder(input_maps[:,-1,:],r2n=True)
-                )
-                return W_params(params, input_maps_stokes)
-        else:
-            final_W_params = None
-
-        res.W_maxL = final_W
-        res.A_maxL = final_A_maxL
-        res.s = np.array([hp.reorder(final_maps[component], n2r=True) for component in range(final_maps.shape[0])])
-        res.iterations_done = number_iterations
-        res.success = number_iterations < max_iter
-        res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
-        res.W_params = final_W_params
-        return res
-    
 
 def perform_compsep(
     first_guess_params, 
@@ -145,7 +37,9 @@ def perform_compsep(
     binary_mask=None,
     dust_nu0=150.0, 
     synchrotron_nu0=150.0, 
-    central_freq_op=None,
+    matrix_central=None, #TODO: Merge all 3 matrix_central, matrix_precond, common_filtered_eigenvector into one preconditioner object
+    matrix_precond=None,
+    common_filtered_eigenvector=None,
     obs_mat_operator=None, 
     obsmat_operator_rhs=None,
     use_preconditioner_diag=False,
@@ -154,8 +48,8 @@ def perform_compsep(
     use_preconditioner_qr_test=False,
     use_preconditioner_qr_test_pixels=False,
     use_preconditioner_svd_test=False,
+    use_preconditioner_common_basis=False,
     indices_freq_not_filtered=None,
-    matrix_precond=None,
     dictionary_parameters_minimization: dict={
         'max_iter':1, 
         'tol':1e-5,
@@ -339,8 +233,16 @@ def perform_compsep(
     if obsmat_operator_rhs is None:
         obsmat_operator_rhs = obs_mat_operator.T
     
-    if central_freq_op is None:
+    if matrix_central is None:
         central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
+    else:
+        assert matrix_central.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a precomputed matrix for the likelihood, it must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
+        assert matrix_central.shape[-1] == matrix_central.shape[-2], "Precomputed matrix for the likelihood must have square submatrices."
+        assert matrix_central.ndim == 5, "Precomputed matrix for the likelihood must have 5 dimensions (n_freq, n_stokes, n_stokes, n_pix, n_pix)."
+
+        central_freq_op = get_dense_furax_operator_from_freq_array(
+                matrix_central
+            )
 
     if indices_freq_not_filtered is not None:
         assert np.isin(indices_freq_not_filtered, np.arange(frequencies.size)).all(), "The indices of frequencies not filtered must be in the range of the number of frequencies."
@@ -365,8 +267,11 @@ def perform_compsep(
         use_preconditioner_qr_test=use_preconditioner_qr_test,
         use_preconditioner_qr_test_pixels=use_preconditioner_qr_test_pixels,
         use_preconditioner_svd_test=use_preconditioner_svd_test,
+        use_preconditioner_common_basis=use_preconditioner_common_basis,
         invN_matrix=invN_matrix_nested, 
         matrix_precond=matrix_precond,
+        matrix_central=matrix_central,
+        common_filtered_eigenvector=common_filtered_eigenvector,
         indices_freq_not_filtered=indices_freq_not_filtered, 
         structure_sed=structure_sed,
         structure_sky_map=sky_map.structure,

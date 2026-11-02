@@ -69,6 +69,8 @@ def compute_eigenspectrum_from_matrices(
         assert np.isin(indices_freq_not_filtered, np.arange(n_freq)).all(), "The indices of frequencies not filtered must be in the range of the number of frequencies."
 
         logger.warning(f"Not computing eigenspectra for frequencies indices {indices_freq_not_filtered}, corresponding to name outputs {[list_name_output[i] for i in indices_freq_not_filtered]} ")
+    else:
+        indices_freq_not_filtered = []
 
     eigh_jitted = jax.jit(jax.numpy.linalg.eigh, static_argnames=['UPLO', 'symmetrize_input'])
     for idx_freq in range(n_freq):
@@ -79,11 +81,16 @@ def compute_eigenspectrum_from_matrices(
             logger.warning(f"## File {path_save} already exists, skipping computation.")
             continue
         
+        invN_nested = hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel()
+
         if idx_freq in indices_freq_not_filtered:
-            logger.warning(f"Skipping computation for frequency index {idx_freq} as it is in the list of frequencies not filtered, storing instead identity matrix.")
+            logger.warning(f"Skipping computation for frequency index {idx_freq} as it is in the list of frequencies not filtered, storing instead N^-1 (diagonal).")
+
+            
             
             logger.info(f"Saving to: {path_save}")
-            eigvals = np.ones(nstokes * n_pix_masked)
+            # eigvals = np.ones(nstokes * n_pix_masked)
+            eigvals = np.asarray(invN_nested)
             eigvecs = np.eye(nstokes * n_pix_masked)
 
             jnp.savez(path_save, eigvals=eigvals, eigvecs=eigvecs)
@@ -91,14 +98,13 @@ def compute_eigenspectrum_from_matrices(
 
         obsmat_array = jnp.array(list_scipy_obsmat_masked[idx_freq].todense())
 
-        invN_nested = hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel()
-        N_nested_sqrt = jnp.sqrt(np.where(invN_nested != 0, 1/invN_nested, 0))
+        
 
         time_start = time.time()
         array_to_eigen = contract(
             'ab,b,bc->ac', 
             obsmat_array.T, 
-            hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel(), 
+            invN_nested,
             obsmat_array
         )
 

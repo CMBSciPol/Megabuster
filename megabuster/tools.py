@@ -2,11 +2,13 @@ import numpy as np
 import healpy as hp
 import jax.numpy as jnp
 from jaxtyping import ArrayLike
+from typing import Callable
 
 from furax.core import BlockColumnOperator, BlockRowOperator, BroadcastDiagonalOperator, DenseBlockDiagonalOperator, DiagonalOperator
 from furax.obs.stokes import StokesQU
 
 __all__ = [
+    'Results',
     'build_furax_preconditioner',
     'get_maps_from_Stokes',
     'get_diagonal_operator_from_stokes_maps',
@@ -15,6 +17,114 @@ __all__ = [
     'get_healpix_indices_patch_from_mask',
     'get_A_from_array_stokes'
 ]
+
+class Results(object):
+    """
+    Class to store the results of the component separation.
+    
+    Attributes:
+        x (ArrayLike):
+            Parameters fitted, stored as an array.  
+        s (ArrayLike):
+            Sky map, stored as an array of shape (n_components, n_stokes, n_pixels).
+        W_maxL (Callable):
+            Function representing the mixing matrix operator at the parameters fitted.
+        success (bool):
+            Boolean indicating whether the optimization was successful.
+    """
+    params: list[str] = ['temp_dust', 'beta_dust', 'beta_pl']
+    x: ArrayLike # parameters fitted
+    s: ArrayLike # sky map
+    W_maxL: Callable # W function at the parameters fitted
+    A_maxL: ArrayLike # Mixing matrix operator at the parameters fitted
+    success: bool # success of the optimization
+    message: str
+    W_params: Callable = None # Function to apply the mixing matrix operator at the parameters fitted
+    
+    def __init__(self):
+        self.params = None
+        self.x = None
+        self.s = None
+        self.W_maxL = None
+        self.A_maxL = None
+        self.success = False
+        self.message = "No optimization performed yet."
+        self.W_params = None
+
+    @classmethod
+    def from_compsep_results(
+        cls, 
+        name_params,
+        final_params, 
+        final_W_func, 
+        final_A_maxL,
+        final_maps, 
+        number_iterations, 
+        max_iter, 
+        ordering_parameter=['beta_dust', 'beta_pl'], 
+        ordering_component=['cmb', 'dust', 'synchrotron'],
+        W_params=None
+):
+        """
+        Create an instance of Results from the component separation results.
+        
+        Args:
+            final_params (dict): 
+                Final parameters after optimization.
+            final_W_func (function): Function representing the final mixing matrix operator.
+            final_maps (Stokes or ndarray): Final sky map.
+            number_iterations (int): Number of iterations performed.
+            max_iter (int): Maximum number of iterations allowed.
+        
+        Returns:
+            Results: An instance of Results containing the final parameters, W function, and success status.
+        """
+        res = cls()
+        res.params = name_params
+        res.x = np.array([final_params[key] for key in ordering_parameter])
+
+        def final_W(input_maps):
+            """
+            Function to apply the final mixing matrix operator to the input maps.
+            """
+
+            assert input_maps.ndim == 3, "Input maps must have shape (n_frequencies, n_stokes, n_pixels)."
+            assert input_maps.shape[1] >= 2, "Input maps must contain at least Q and U Stokes parameters."
+            
+
+            input_maps_stokes = Stokes.from_stokes(
+                q=hp.reorder(input_maps[:,-2,:],r2n=True), 
+                u=hp.reorder(input_maps[:,-1,:],r2n=True)
+            )
+            return final_W_func(input_maps_stokes)
+        
+        if W_params is not None:
+            def final_W_params(params, input_maps):
+                """
+                Function to apply the final mixing matrix operator to the input maps.
+                """
+
+                assert input_maps.ndim == 3, "Input maps must have shape (n_frequencies, n_stokes, n_pixels)."
+                assert input_maps.shape[1] >= 2, "Input maps must contain at least Q and U Stokes parameters."
+                
+
+                input_maps_stokes = Stokes.from_stokes(
+                    q=hp.reorder(input_maps[:,-2,:],r2n=True), 
+                    u=hp.reorder(input_maps[:,-1,:],r2n=True)
+                )
+                return W_params(params, input_maps_stokes)
+        else:
+            final_W_params = None
+
+        res.W_maxL = final_W
+        res.A_maxL = final_A_maxL
+        res.s = np.array([hp.reorder(final_maps[component], n2r=True) for component in range(final_maps.shape[0])])
+        res.iterations_done = number_iterations
+        res.success = number_iterations < max_iter
+        res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
+        res.W_params = final_W_params
+        return res
+    
 
 def get_maps_from_Stokes(final_maps):
     if isinstance(final_maps, StokesQU):
