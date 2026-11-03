@@ -22,7 +22,6 @@ __all__ = [
     'PreconditionerDiagonal',
     'PreconditionerSVD',
     'PreconditionerQR',
-    'PreconditionerSVD_test',
     'PreconditionerCommonBasis',
 ]
 
@@ -182,148 +181,6 @@ class PreconditionerQR:
 
         return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
 
-class PreconditionerQR_test:
-    def __init__(
-        self, 
-        matrix_precond,
-        invN_matrix,
-        structure_sed,
-        structure_sky_map,
-        *args,
-        **kwargs
-    ):
-        logger.info("Setting up QR decomposition preconditioner")
-
-        self.structure_sed = structure_sed
-
-        self.n_pix = structure_sky_map.shape[-1]
-
-        if matrix_precond is not None:
-            _check_matrix_precond_dense(matrix_precond, n_freq=invN_matrix.shape[0], n_stokes=invN_matrix.shape[1])
-
-            self.central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
-        else:
-            #TODO: This is not correct, would maybe need invN, but for now good enough (177 iter without matrix_precond in easy case)
-            self.central_operator_precond = IdentityOperator(in_structure=structure_sky_map)
-
-
-    def get(self, A):
-        logger.info("Using QR decomposition for the preconditioner computation")
-
-        matrix_A = get_array_from_A(A, self.n_pix)
-
-        q_matrix, r_matrix = jnp.linalg.qr(matrix_A[...,0].T)
-
-        pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
-            '...ab,...cb->...ac',
-            jnp.linalg.pinv(r_matrix),
-            q_matrix
-        ))
-
-        pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, self.structure_sed)
-
-        return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
-
-class PreconditionerQR_test_pixels:
-    def __init__(
-        self, 
-        matrix_precond,
-        invN_matrix,
-        structure_sed,
-        structure_sky_map,
-        *args,
-        **kwargs
-    ):
-        logger.info("Setting up QR decomposition preconditioner")
-
-        self.structure_sed = structure_sed
-
-        self.n_pix = structure_sky_map.shape[-1]
-
-        if matrix_precond is not None:
-            _check_matrix_precond_dense(matrix_precond, n_freq=invN_matrix.shape[0], n_stokes=invN_matrix.shape[1])
-
-            self.central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
-        else:
-            #TODO: This is not correct, would maybe need invN, but for now good enough (177 iter without matrix_precond in easy case)
-            self.central_operator_precond = IdentityOperator(in_structure=structure_sky_map)
-
-
-    def get(self, A):
-        logger.info("Using QR decomposition for the preconditioner computation")
-
-        matrix_A = get_array_from_A(A, self.n_pix)
-
-        weighted_A = jnp.einsum('fcp,s->spfc', matrix_A, jnp.ones(2))
-        q_matrix, r_matrix = jnp.linalg.qr(weighted_A)
-
-        pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
-            '...ab,...cb->...ac',
-            jnp.linalg.pinv(r_matrix),
-            q_matrix
-        ))
-
-        pseudo_inverse_A_op = get_A_from_array_stokes(
-            jnp.einsum('spcf->csfp', pseudo_inverse_B),
-            self.structure_sed
-        )
-        return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
-
-
-class PreconditionerSVD_test:
-    def __init__(
-        self, 
-        invN_matrix, 
-        matrix_precond,
-        indices_freq_not_filtered, 
-        structure_sed,
-        structure_sky_map,
-        *args,
-        **kwargs
-    ):
-        logger.info("Setting up SVD decomposition test preconditioner")
-
-        prefactor_pixel_weight_A, inverse_prefactor_pixel_weight_A = _get_frequency_weights(invN_matrix, indices_freq_not_filtered)
-
-        self.prefactor_pixel_weight_A = prefactor_pixel_weight_A
-        self.structure_sed = structure_sed
-
-        self.n_pix = invN_matrix.shape[-1]
-
-        if matrix_precond is not None:
-            _check_matrix_precond_dense(matrix_precond, n_freq=invN_matrix.shape[0], n_stokes=invN_matrix.shape[1])
-
-            operator_inverse_prefactor = get_diagonal_operator_from_stokes_maps(
-                inverse_prefactor_pixel_weight_A,
-                structure_sky_map
-            )
-            self.central_operator_precond = operator_inverse_prefactor @ get_dense_furax_operator_from_freq_array(matrix_precond) @ operator_inverse_prefactor
-        else:
-            self.central_operator_precond = IdentityOperator(in_structure=structure_sky_map)
-
-    def get(self, A):
-        logger.info("Using SVD decomposition test for the preconditioner computation")
-
-        matrix_A = get_array_from_A(A, self.n_pix)
-
-        weighted_A = jnp.einsum('fcp,fsp->spfc', matrix_A, self.prefactor_pixel_weight_A)
-        matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(weighted_A, full_matrices=False)
-
-        pseudo_inverse_B = jax.lax.stop_gradient(jnp.einsum(
-                '...ba,...b,...cb->...ac', 
-                matrix_vh, 
-                jnp.where(matrix_s!=0, 1./matrix_s, 0.),
-                matrix_u,
-            )
-        )
-
-        pseudo_inverse_A_op = get_A_from_array_stokes(
-            jnp.einsum('spcf->csfp', pseudo_inverse_B),
-            self.structure_sed
-        )
-
-        return pseudo_inverse_A_op.T @ self.central_operator_precond @ pseudo_inverse_A_op
-
 class PreconditionerCommonBasis:
     """
     Assuming O and N to be diagonal in frequency, then we can define C_f = O_f^T N_f^-1 O_f, 
@@ -428,17 +285,14 @@ def get_preconditioner(
     use_preconditioner_diag: bool = False,
     use_preconditioner_pinv: bool = False,
     use_preconditioner_qr: bool = False,
-    use_preconditioner_qr_test: bool = False,
-    use_preconditioner_qr_test_pixels: bool = False,
-    use_preconditioner_svd_test: bool = False,
     use_preconditioner_common_basis: bool = False,
     *args,
     **kwargs
 ):
-    list_of_flags = [use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr, use_preconditioner_qr_test, use_preconditioner_qr_test_pixels, use_preconditioner_svd_test, use_preconditioner_common_basis]
+    list_of_flags = [use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr, use_preconditioner_common_basis]
 
     number_preconditioners = sum(bool(flag) for flag in list_of_flags)
-    assert number_preconditioners <= 1, "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr or use_preconditioner_svd_test) can be set to True."
+    assert number_preconditioners <= 1, "Only one type of preconditioner (use_preconditioner_diag, use_preconditioner_pinv, use_preconditioner_qr or use_preconditioner_common_basis) can be set to True."
 
     if use_preconditioner_diag:
         return PreconditionerDiagonal(
@@ -452,21 +306,6 @@ def get_preconditioner(
         )
     elif use_preconditioner_qr:
         return PreconditionerQR(
-            *args,
-            **kwargs
-        )
-    elif use_preconditioner_qr_test:
-        return PreconditionerQR_test(
-            *args,
-            **kwargs
-        )
-    elif use_preconditioner_qr_test_pixels:
-        return PreconditionerQR_test_pixels(
-            *args,
-            **kwargs
-        )
-    elif use_preconditioner_svd_test:
-        return PreconditionerSVD_test(
             *args,
             **kwargs
         )
