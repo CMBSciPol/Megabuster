@@ -215,7 +215,6 @@ class PreconditionerCommonBasis:
         matrix_central, 
         invN_matrix, 
         structure_sed, 
-        indices_freq_not_filtered=None, 
         *args, 
         **kwargs
     ):
