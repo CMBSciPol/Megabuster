@@ -22,7 +22,8 @@ __all__ = [
     'PreconditionerDiagonal',
     'PreconditionerSVD',
     'PreconditionerQR',
-    'PreconditionerSVD_test'
+    'PreconditionerSVD_test',
+    'PreconditionerCommonBasis',
 ]
 
 
@@ -325,21 +326,27 @@ class PreconditionerSVD_test:
 
 class PreconditionerCommonBasis:
     """
-    Preconditioner for M = sum_f A_f^T C_f A_f, with C_f = O_f^T N_f^-1 O_f the central block of
-    frequency f (dense, given as matrix_central = load_matrix_precond(..., power_diagonal=1)).
+    Assuming O and N to be diagonal in frequency, then we can define C_f = O_f^T N_f^-1 O_f, 
+    the central block of frequency f (dense, given as matrix_central = load_matrix_precond(..., power_diagonal=1)).
+    We then want a preconditioner for M = sum_f A_f^T C_f A_f. 
 
-        P = V [sum_f a_f a_f^T lambda_{f,k}]^-1 V^T,   lambda_{f,k} = (V^T C_f V)_kk
+    As we have already access to the eigenvalue decomposition of C_f, which is 
+    C_f = V_f Lambda_f V_f^T, we can build a preconditioner in a common basis V, 
+    e.g. the eigenvectors of one filtered frequency (so with a O not identity, ideally the least sparse one)
+    Selecting such one f_s to define V = V_{f_s} (for example C_{f_s} = V Lambda_{f_s} V^T), we can then have a diagonal
+    approximation of all the C_f in this common basis as
+        
+        lambda_{f,k} = (V^T C_f V)_kk, with k running over nstokes x npix
+
+    This will be equal to the eigenvalues of the chosen frequency f_s, and the other frequencies will be approximated by their diagonal in this basis,
+    which is good enoguh if the filtering stages are similar enough. 
+    We then have a preconditioner for M as
+
+        P = V [sum_f A_f A_f^T lambda_{f,k}]^-1 V^T,  
 
     i.e. all the (whitened) C_f are approximated by their diagonal in a common orthonormal basis V, where M is
     then block diagonal with one 3x3 block per mode k, inverted exactly. 
 
-    common_filtered_eigenvector: V, e.g. the precomputed eigenvectors of C_f for one filtered frequency
-        (no new eigendecomposition). If None, V is the eigenbasis of sum_f C~_f / tr(C~_f), C~_f = W^-1 C_f W^-1.
-      
-    Built with furax operators: P = V_op @ B^-1_op @ V_op.T @, with V_op.T a DenseBlockDiagonalOperator
-    applying V^T to each component map (the mode index is reshaped as (n_stokes, n_pix)), and B^-1_op the per mode
-    3x3 inverses as a BlockColumnOperator of DiagonalOperators (build_furax_preconditioner, as for the diagonal
-    preconditioner, with modes instead of pixels).
     """
 
     components = ('cmb', 'dust', 'synchrotron')
