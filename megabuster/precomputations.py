@@ -20,6 +20,10 @@ __all__ = [
 def save_obsmat_precomputation(list_path_obsmat_input, list_path_obsmat_output):
     for i, path_obsmat in enumerate(list_path_obsmat_input):
         
+        if path_obsmat is None:
+            logger.warning(f"## Path {path_obsmat} is None, skipping computation.")
+            continue
+
         add_ = ''
         if not str(path_obsmat).endswith('.npz'):
             add_ = '.npz'
