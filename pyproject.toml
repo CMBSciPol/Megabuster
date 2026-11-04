@@ -37,6 +37,7 @@ dependencies = [
     'equinox',
     'optax',
     'lineax',
+    'jaxopt',
     'jaxtyping',
     'opt_einsum',
     'tqdm',
