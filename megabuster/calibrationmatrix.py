@@ -13,7 +13,8 @@ from furax.core import DiagonalOperator, IndexOperator, BlockColumnOperator, Blo
 __all__ = [
     'build_calibration_operator', 'StokesPyTree_to_list', 'list_to_stokes'
 ]
-    
+
+
 def build_calibration_operator(angles, shape) -> BlockDiagonalOperator:
     """
     Calibration Operator:
@@ -23,9 +24,9 @@ def build_calibration_operator(angles, shape) -> BlockDiagonalOperator:
     # Calibration matrix per frequency sample
 
     Calibration_Operator = QURotationOperator.create(
-    shape=shape,
-    stokes="QU",
-    angles=angles,
+        shape=shape,
+        stokes="QU",
+        angles=angles,
     )
     #    for alpha in angles
     #]
@@ -34,41 +35,36 @@ def build_calibration_operator(angles, shape) -> BlockDiagonalOperator:
 
     return Calibration_Operator
 
+
 def build_calibration_operator2(stokes_maps, angles, in_structure):
     """
-    Given stokes maps, return a BlockDiagonalOperator that
+    Given stokes maps, return a DiagonalOperator that
     applies the diagonal operator to a StokesQU object.
-    
-    in_structure is the structure of the StokesQU object.
+    in_structure is the structure of one Stokes component of the StokesQU object.
 
     Parameters
     ----------
     stokes_maps : np.ndarray
         The stokes maps, must have the last two shapes expressed as (..., n_stokes, n_pix).
     in_structure : ShapeDtypeStruct
-        The structure of the StokesQU object.
+        The structure of one Stokes component (Q or U) of the StokesQU object.
 
     Returns
     -------
-    BlockDiagonalOperator
-        The diagonal operator as a BlockDiagonalOperator built from StokesQU pytree.
+    DiagonalOperator
+        The diagonal operator acting on the StokesQU object, which multiplies its Q and U
+        components by stokes_maps[..., 0, :] and stokes_maps[..., 1, :].
     """
 
     assert len(stokes_maps.shape) >= 2, "stokes_maps must have shape (..., n_stokes, n_pix)"
 
-    nstokes = stokes_maps.shape[-2]
-
-    tuple_diagonal_operators = tuple(
-        DiagonalOperator(
-            stokes_maps[..., num_stokes, :],
-            in_structure=in_structure
-        ) for num_stokes in range(nstokes)
+    # A StokesQU object stores Q and U stacked on its leading axis: the diagonal values of each
+    # Stokes component are moved there.
+    return DiagonalOperator(
+        jnp.moveaxis(jnp.asarray(stokes_maps), -2, 0),
+        in_structure=StokesQU.structure_for(in_structure.shape, in_structure.dtype),
     )
-    return BlockDiagonalOperator(
-            StokesQU(
-                    *tuple_diagonal_operators
-            )
-        )
+
 
 def StokesPyTree_to_list(stokes_pytree: PyTree) -> list[StokesQU]:
     """Convert a PyTree or Stokes-like object into a list of `StokesQU` per frequency.

@@ -130,8 +130,8 @@ class Results(object):
             
 
             input_maps_stokes = Stokes.from_stokes(
-                Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                Q=input_maps[:,-2,:], 
+                U=input_maps[:,-1,:]
             )
             return final_W_func(input_maps_stokes)
         
@@ -146,8 +146,8 @@ class Results(object):
                 
 
                 input_maps_stokes = Stokes.from_stokes(
-                    Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                    U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                    Q=input_maps[:,-2,:], 
+                    U=input_maps[:,-1,:]
                 )
                 return W_params(params, input_maps_stokes)
         else:
@@ -155,7 +155,7 @@ class Results(object):
 
         res.W_maxL = final_W
         res.A_maxL = final_A_maxL
-        res.s = np.array([hp.reorder(final_maps[component], n2r=True) for component in range(final_maps.shape[0])])
+        res.s = np.array(final_maps)
         res.success = number_iterations < max_iter
         res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
         res.W_params = final_W_params
@@ -333,7 +333,7 @@ def perform_compsep(
 
     #assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
-    use_full_sky = True
+    use_full_sky = False
 
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
@@ -348,7 +348,7 @@ def perform_compsep(
             pixels_to_retain = np.where(binary_mask != 0)[0]
             pixels_to_retain_t = np.where(binary_mask != 0)[0]
             n_pix = pixels_to_retain.size
-            unobserved_pixels = None
+            #unobserved_pixels = None
         #unobserved_pixels = np.where(binary_mask == 0)[0]
         #pixels_to_retain = np.where(binary_mask != 0)[0]
         pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
@@ -374,7 +374,8 @@ def perform_compsep(
 
     #invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain_nested.size,))
     invN_matrix_ring = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain.size,))
-    invN_matrix_ring[..., unobserved_pixels] = 0.0
+    if use_full_sky:
+        invN_matrix_ring[..., unobserved_pixels] = 0.0
 
     for i in range(invN_matrix.shape[0]):
         #invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)[..., pixels_to_retain_nested]
@@ -521,7 +522,9 @@ def perform_compsep(
 
         # 4. Regularisation : remplacer les pixels non-observés par l'identité avant inversion
         eye = jnp.eye(n_comp * n_stokes)
-        matrix_2d = matrix_2d.at[unobserved_pixels].set(eye)
+
+        if unobserved_pixels is not None:
+            matrix_2d = matrix_2d.at[unobserved_pixels].set(eye)
 
         #jax.debug.print("NaN in matrix_2d after regularization: {}", jnp.any(jnp.isnan(matrix_2d)))
         #jax.debug.print("Inf in matrix_2d after regularization: {}", jnp.any(jnp.isinf(matrix_2d)))
@@ -535,7 +538,8 @@ def perform_compsep(
         #jax.debug.print("NaN in inv_matrix_2d: {}", jnp.any(jnp.isnan(inv_matrix_2d)))
         # 6. Remettre à zéro les pixels non-observés
         #inv_matrix_2d = inv_matrix_2d.at[unobserved_pixels].set(0.0)
-        inv_matrix_2d = inv_matrix_2d.at[unobserved_pixels].set(0.0)
+        if unobserved_pixels is not None:
+            inv_matrix_2d = inv_matrix_2d.at[unobserved_pixels].set(0.0)
 
         # Reshape back
         preconditioner_matrix = inv_matrix_2d.reshape(n_pix, n_comp, n_stokes, n_comp, n_stokes).transpose(1, 3, 2, 4, 0)
@@ -680,23 +684,34 @@ def perform_compsep(
             for i, component in enumerate(A.block_leaves):
                 matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
             
-            diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
-            #diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
+            if use_full_sky:
+                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
+            else:
+                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
             first_central_term = diagonal_central_term(AOND)
 
         elif not use_obsmat:
             Op = A.T @ central_freq_op @ A
-            #preconditioner = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
-            preconditioner = IdentityOperator(in_structure=Op.in_structure)
-            diagonal_central_term = (A.T @ central_freq_op @ A).I(
-                solver=lx.CG(
-                    rtol=dictionary_parameters_CG['tol_CG'], 
-                    atol=dictionary_parameters_CG['tol_CG'], 
-                    max_steps=dictionary_parameters_CG['max_steps_CG']
-                ), 
-                preconditioner=preconditioner,
-                callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
-            )
+            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
+            for i, component in enumerate(A.block_leaves):
+                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
+
+            if use_full_sky:
+                diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+            else:
+                diagonal_central_term = build_preconditioner(invN, matrix_A, Op)
+
+            #diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+            #preconditioner = IdentityOperator(in_structure=Op.in_structure)
+            #diagonal_central_term = (A.T @ central_freq_op @ A).I(
+            #    solver=lx.CG(
+            #        rtol=dictionary_parameters_CG['tol_CG'], 
+            #        atol=dictionary_parameters_CG['tol_CG'], 
+            #        max_steps=dictionary_parameters_CG['max_steps_CG']
+            #    ), 
+            #    preconditioner=preconditioner,
+            #    callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
+            #)
             first_central_term = diagonal_central_term(AOND)
             #print('first_central_term 1 = ', first_central_term)
             #jax.debug.print("'first_central_term 1 = {}", first_central_term)
@@ -1047,6 +1062,9 @@ def perform_compsep(
         else:
             params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
                     if p in output_params]
+            
+    print('Oh')
+    print("Final output parameters:", output_params, flush=True)
 
     A_maxL, final_maps = get_A_s_AOND(output_params)[:2]
 
@@ -1062,6 +1080,8 @@ def perform_compsep(
     final_maps_full_sky = np.zeros((number_components, final_maps_ring.shape[-2], binary_mask.shape[-1]), dtype=final_maps_ring.dtype)
     final_maps_full_sky[..., pixels_to_retain] = final_maps_ring
 
+    print('nan dans les maps ?', jnp.any(jnp.isnan(final_maps_ring)))
+
     def W_maxL(input_map):
             
         output_map_truncated = get_A_s_AOND(output_params)[1][...,pixels_to_retain_t]
@@ -1071,8 +1091,11 @@ def perform_compsep(
         output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_ring.dtype)
         
         output_map[..., pixels_to_retain_t] = output_map_ring
+
+        print('nan dans les output_map_ring ?', jnp.any(jnp.isnan(output_map_ring)))
+        
         for i in range(number_components):
-            output_map[i] = hp.reorder(output_map[i], n2r=True)
+            output_map[i] = output_map[i]
         return output_map
 
     def W_params(params, input_map):
@@ -1081,11 +1104,12 @@ def perform_compsep(
 
         output_map_ring = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
-        output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_nested.dtype)
+        output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_ring.dtype)
         
         output_map[..., pixels_to_retain_t] = output_map_ring
+        print('nan dans les output_map2 ?', jnp.any(jnp.isnan(output_map)))
         for i in range(number_components):
-            output_map[i] = hp.reorder(output_map[i], n2r=True)
+            output_map[i] = output_map[i]
         return output_map
 
     return Results.from_compsep_results(

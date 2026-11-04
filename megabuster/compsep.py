@@ -3,6 +3,7 @@ import shutil
 import numpy as np
 import jax
 jax.config.update("jax_traceback_filtering", "off")
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import equinox
 import lineax as lx
@@ -23,11 +24,13 @@ from furax.core import IdentityOperator
 from furax.tree import as_structure
 from furax.obs.stokes import Stokes
 from furax.obs.operators._qu_rotations import QURotationOperator
+from furax.obs.operators._beam_operator import BeamOperator
 
 from furax_cs import minimize, SOLVER_NAMES
 
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
 from megabuster.calibrationmatrix import build_calibration_operator, StokesPyTree_to_list, list_to_stokes
+from megabuster.BandpassOperator import BandpassOperator
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
     get_preconditioner,
@@ -36,7 +39,6 @@ from megabuster.tools import (
     get_maps_from_Stokes, 
     get_dense_furax_operator_from_freq_array
 )
-jax.config.update("jax_enable_x64", True)
 
 __all__ = [
     'Results',
@@ -70,6 +72,8 @@ class Results(object):
     #mean_cov: list = None # Mean values of estimated parameters
     mc_samples = None # Results samples from HMC
     mean_deg = None # Mean values of estimated parameters in degrees if angles were estimated
+    diagonal_central_term = None
+    W_array=None,
     def __init__(self):
         self.params = None
         self.x = None
@@ -83,6 +87,8 @@ class Results(object):
         self.params_names = None
         self.mc_samples = None
         self.mean_deg = None
+        self.diagonal_central_term = None
+        self.W_array=None,
 
     @classmethod
     def from_compsep_results(
@@ -100,7 +106,10 @@ class Results(object):
         Cov=None,
         params_names = None,
         mc_samples = None,
-        mean_deg = None
+        mean_deg = None,
+        diagonal_central_term=None,
+        W_array=None,
+        
 ):
         """
         Create an instance of Results from the component separation results.
@@ -130,8 +139,8 @@ class Results(object):
             
 
             input_maps_stokes = Stokes.from_stokes(
-                Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                q=input_maps[:,-2,:], 
+                u=input_maps[:,-1,:]
             )
             return final_W_func(input_maps_stokes)
         
@@ -146,8 +155,8 @@ class Results(object):
                 
 
                 input_maps_stokes = Stokes.from_stokes(
-                    Q=hp.reorder(input_maps[:,-2,:],r2n=True), 
-                    U=hp.reorder(input_maps[:,-1,:],r2n=True)
+                    q=input_maps[:,-2,:], 
+                    u=input_maps[:,-1,:]
                 )
                 return W_params(params, input_maps_stokes)
         else:
@@ -155,7 +164,7 @@ class Results(object):
 
         res.W_maxL = final_W
         res.A_maxL = final_A_maxL
-        res.s = np.array([hp.reorder(final_maps[component], n2r=True) for component in range(final_maps.shape[0])])
+        res.s = np.array(final_maps)
         res.success = number_iterations < max_iter
         res.message = f"Optimization finished after {number_iterations} iterations out of {max_iter} allowed."
         res.W_params = final_W_params
@@ -163,6 +172,8 @@ class Results(object):
         res.params_names = params_names
         res.mc_samples = mc_samples
         res.mean_deg = mean_deg
+        res.diagonal_central_term = diagonal_central_term
+        res.W_array = W_array
         return res
 
 def dot_2(x,y):
@@ -193,11 +204,13 @@ def perform_compsep(
     sky_map, 
     frequencies, 
     invN_matrix,
+    real_invN_matrix=None,
+    real_sky_map = None,
     do_minimization=False,
     fixed_params=dict(),
     binary_mask=None,
     dust_nu0=150.0, 
-    synchrotron_nu0=20.0,
+    synchrotron_nu0=150.0,
     central_freq_op=None,
     use_calibration_matrix=True,
     use_obsmat=False,
@@ -222,6 +235,7 @@ def perform_compsep(
     n_warm = 300,
     n_samples = 10000,
     is_noise_map = False,
+    use_bandpass = False,
     ):
     """
     Perform component separation using the given parameters and data.
@@ -316,6 +330,33 @@ def perform_compsep(
     All the inputs for sky map, inverse noise covariance matrix, and observation matrix operator are assumed to contain only the pixels observed and not the full sky, which otherwise leads to a significant increase in computation time. 
     """
 
+    if isinstance(invN_matrix, dict):
+        any_arr = next(iter(invN_matrix.values()))
+        npix_invN = any_arr.shape[-1]
+        invN_matrix_full = np.zeros((len(config.map_sets), any_arr.shape[1], npix_invN), dtype=any_arr.dtype)
+        for exp, arr in invN_matrix.items():
+            idx = [i for i, m in enumerate(config.map_sets) if m.exp_tag == exp]
+            invN_matrix_full[idx] = arr
+        invN_matrix = invN_matrix_full
+
+    if isinstance(real_invN_matrix, dict):
+        any_arr_real = next(iter(real_invN_matrix.values()))
+        npix_real = any_arr_real.shape[-1]
+        real_invN_matrix_full = np.zeros(
+            (len(config.map_sets), any_arr_real.shape[1], npix_real), dtype=any_arr_real.dtype
+        )
+        for exp, arr in real_invN_matrix.items():
+            idx = [i for i, m in enumerate(config.map_sets) if m.exp_tag == exp]
+            real_invN_matrix_full[idx] = arr
+        real_invN_matrix = real_invN_matrix_full
+
+    if isinstance(binary_mask, dict):
+        any_mask = next(iter(binary_mask.values()))
+        binary_mask_union = np.zeros_like(any_mask)
+        for arr in binary_mask.values():
+            binary_mask_union = np.maximum(binary_mask_union, arr)
+        binary_mask = binary_mask_union
+
     n_stokes = 2
 
     # Few tests
@@ -334,16 +375,23 @@ def perform_compsep(
     #assert solver_name in SOLVER_NAMES.__args__, f"Solver name must be one of {SOLVER_NAMES.__args__}."
 
     use_full_sky = True
-
     if binary_mask is not None:
         assert isinstance(binary_mask, ArrayLike), "Binary mask must be a ndarray."
         assert binary_mask.ndim == 1, "Binary mask must be a 1D array."
         pixels_mask = np.where(binary_mask != 0)[0]
         if use_full_sky:
+            #npix_full = invN_matrix.shape[-1]
+            #unobserved_pixels = np.where(binary_mask == 0)[0]
+            #pixels_to_retain = np.arange(npix_full)
+            #n_pix = pixels_to_retain.size
             npix_full = invN_matrix.shape[-1]
-            unobserved_pixels = np.where(binary_mask == 0)[0]
+            n_pix = npix_full
             pixels_to_retain = np.arange(npix_full)
-            n_pix = pixels_to_retain.size
+            pixels_to_retain_t = np.where(binary_mask != 0)[0]
+            pixels_to_retain_nested = np.arange(npix_full)
+            unobserved_pixels = np.where(binary_mask == 0)[0] 
+            binary_mask = np.ones(npix_full)
+            #unobserved_pixels = np.array([], dtype=int)
         else :
             pixels_to_retain = np.where(binary_mask != 0)[0]
             pixels_to_retain_t = np.where(binary_mask != 0)[0]
@@ -353,9 +401,13 @@ def perform_compsep(
         #pixels_to_retain = np.where(binary_mask != 0)[0]
         pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
     else:
-        pixels_to_retain = np.ones_like(invN_matrix.shape[-1], dtype=bool)
-        pixels_to_retain_nested = np.ones_like(pixels_to_retain, dtype=bool)
-        binary_mask = np.ones(invN_matrix.shape[-1])
+        npix_full = invN_matrix.shape[-1]
+        n_pix = npix_full
+        pixels_to_retain = np.arange(npix_full)
+        pixels_to_retain_t = np.where(binary_mask != 0)[0]
+        pixels_to_retain_nested = np.arange(npix_full)
+        binary_mask = np.ones(npix_full)
+        unobserved_pixels = np.array([], dtype=int)
     
     if patch_indices is not None:
         assert np.all(np.isin(list(patch_indices.keys()), ['temp_dust_patches', 'beta_dust_patches', 'beta_pl_patches'])), "Single patch indices must be a dictionary with keys 'temp_dust_patches', 'beta_dust_patches', and 'beta_pl_patches'."
@@ -374,12 +426,18 @@ def perform_compsep(
 
     #invN_matrix_nested = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain_nested.size,))
     invN_matrix_ring = np.zeros(invN_matrix.shape[:2] + (pixels_to_retain.size,))
+    if config.pre_proc_pars.use_real_beams:
+        real_invN_matrix_ring = np.zeros(real_invN_matrix.shape[:2] + (pixels_to_retain.size,))
     if use_full_sky:
         invN_matrix_ring[..., unobserved_pixels] = 0.0
+        if config.pre_proc_pars.use_real_beams:
+            real_invN_matrix_ring[..., unobserved_pixels] = 0.0
 
     for i in range(invN_matrix.shape[0]):
         #invN_matrix_nested[i] = hp.reorder(invN_matrix[i], r2n=True)[..., pixels_to_retain_nested]
         invN_matrix_ring[i] = invN_matrix[i][..., pixels_to_retain]
+        if config.pre_proc_pars.use_real_beams:
+            real_invN_matrix_ring[i] = real_invN_matrix[i][..., pixels_to_retain]
         # If noiseless tests create identity noise matrix divided by a factor 100:
         #ones_matrix = np.ones(invN_matrix.shape[1:])/100  # shape (n_stokes, n_pixels)
         #invN_matrix_nested[i] = hp.reorder(ones_matrix, r2n=True)[..., pixels_to_retain_nested]
@@ -391,32 +449,42 @@ def perform_compsep(
         assert sky_map.ndim == 3, "Sky map must have shape (n_frequencies, n_stokes, n_pixels)."
         assert sky_map.shape[1] == n_stokes, "Sky map must contain only Q and U Stokes parameters."
         #sky_map = Stokes.from_stokes(
-        #    Q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
-        #    U=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
+        #    q=hp.reorder(sky_map[:, -2], r2n=True)[..., pixels_to_retain_nested], 
+        #    u=hp.reorder(sky_map[:, -1], r2n=True)[..., pixels_to_retain_nested]
         #)
         sky_map = Stokes.from_stokes(
-            Q=sky_map[:, -2][..., pixels_to_retain], 
-            U=sky_map[:, -1][..., pixels_to_retain]
+            q=sky_map[:, -2][..., pixels_to_retain], 
+            u=sky_map[:, -1][..., pixels_to_retain]
         )
+        if config.pre_proc_pars.use_real_beams:
+            real_sky_map = Stokes.from_stokes(
+                q=real_sky_map[:, -2][..., pixels_to_retain], 
+                u=real_sky_map[:, -1][..., pixels_to_retain]
+            )
     else:
         assert sky_map.q.shape[0] == sky_map.u.shape[0], "Sky map must have the same number of Q and U Stokes parameters."
         assert sky_map.q.shape[1] == sky_map.u.shape[1], "Sky map must have the same number of pixels for Q and U Stokes parameters."
         # Retain only the pixels that are not masked
         #sky_map = Stokes.from_stokes(
-        #    Q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
-        #    U=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
+        #    q=hp.reorder(sky_map.q, r2n=True)[..., pixels_to_retain_nested], 
+        #    u=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
         #)
         sky_map = Stokes.from_stokes(
-            Q=sky_map.q[..., pixels_to_retain], 
-            U=sky_map.u[..., pixels_to_retain]
+            q=sky_map.q[..., pixels_to_retain], 
+            u=sky_map.u[..., pixels_to_retain]
         )
-
+        if config.pre_proc_pars.use_real_beams:
+            real_sky_map = Stokes.from_stokes(
+                q=real_sky_map.q[..., pixels_to_retain], 
+                u=real_sky_map.u[..., pixels_to_retain]
+            )
     # Prepare the in_structure of the upcoming operators
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
-    in_structure_noise_cov = sky_map.structure.q
+    in_structure_noise_cov = sky_map.structure
     vect_shape = sky_map.q.shape
 
     invN = get_diagonal_operator_from_stokes_maps(invN_matrix_ring, in_structure_noise_cov)
+    real_invN = get_diagonal_operator_from_stokes_maps(real_invN_matrix_ring, in_structure_noise_cov) if config.pre_proc_pars.use_real_beams else None
     
     #Noiseless case for tests:
     #invN = IdentityOperator(in_structure=invN2.in_structure)
@@ -437,7 +505,13 @@ def perform_compsep(
     for i, prior in enumerate(angles_prior):
         priors_dict[f'angle_{i}'] = prior
         prior_list.append(prior)
-    first_guess_params = {**first_guess_params,**angles_dict}
+    if do_minimization:
+        # Minimisation : les angles de départ sont les valeurs centrales du prior
+        first_guess_params = {**first_guess_params, **angles_dict}
+    else:
+        # Pas de minimisation : on garde les angles fournis dans first_guess_params
+        # (ex. angles estimés), et on ne prend angle_central_value que pour ceux qui manquent
+        first_guess_params = {**angles_dict, **first_guess_params}
     angles_names = [f'angle_{i}' for i in range(len(angles))]
 
     if use_obsmat:
@@ -468,7 +542,83 @@ def perform_compsep(
             central_matrix_precond = matrix_precond
         
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
-        
+
+    # LOAD BANDPASS OPERATOR
+
+    if use_bandpass:
+        if any(map_set.frequency is None for map_set in config.map_sets):
+            raise ValueError("use_bandpass=True requires the passbands of the map sets (map_set.frequency, map_set.weight).")
+        bandpasses = [(map_set.frequency, map_set.weight) for map_set in config.map_sets]
+        frequencies_mixing = BandpassOperator.integration_frequencies(bandpasses)
+        Bp = BandpassOperator.create_from_samples(
+            bandpasses,
+            in_structure=jax.tree.map(
+            lambda leaf: jax.ShapeDtypeStruct(leaf.shape[:-1] + (frequencies_mixing.size,) + leaf.shape[-1:], leaf.dtype),
+            in_structure_sed,
+            ),
+        )
+    else:
+        frequencies_mixing = frequencies
+        Bp = None
+
+    # LOAD BEAM OPERATOR
+
+    #beams = config.beams
+    #beam_fl = jnp.array([
+    #    hp.gauss_beam(fwhm=np.radians(fwhm / 60), lmax=config.lmax)
+    #    for fwhm in beams
+    #])  # shape (6, lmax+1)
+
+    #print('Beams, lmax = ', beams, config.lmax)
+    #print("beam_fl = ", beam_fl)
+    #print('Checkpoint')
+
+    #B = BeamOperator(
+    #    lmax=config.lmax,
+    #    beam_fl=beam_fl,
+    #    in_structure=invN.in_structure,
+    #    unobserved_pixels=unobserved_pixels  # np.where(binary_mask == 0)[0]
+    #    )
+    
+    #Op_rhs = B.T
+    #print('invN(sky_map) = ', jnp.sum(invN(sky_map).q**2))
+    #Test Beam Operator
+
+    #B_sky = B(sky_map)
+    #B_inv_B_sky = B.I(B_sky)  # ou B.T si BeamOperator n'a pas de .I et que B est juste une convolution (auquel cas B.I doit exister si B est inversible, vérifie l'implémentation de BeamOperator)
+
+    #diff = jax.tree.map(lambda a, b: a - b, B(B_inv_B_sky), B(sky_map))
+    #residual_norm = jnp.sqrt(dot_2(diff, diff))
+    #jax.debug.print("résidu B.I(B(x)) - x = {:.6e}", residual_norm)
+
+    #print('sky_map = ', sky_map)
+    #print('invN = ', invN)
+    ONd = invN(sky_map)
+    if config.pre_proc_pars.use_real_beams:
+        #ONd_Beam = Op_rhs(real_invN(real_sky_map))
+        ONd_Beam = real_invN(real_sky_map)
+        #ONd_Beam = invN(sky_map)
+        #ONd_Beam = Op_rhs(invN(sky_map))
+        reals = real_invN(real_sky_map)
+        falses = invN(sky_map)
+        #reals = np.array(get_maps_from_Stokes(real_invN(real_sky_map)))[pixels_to_retain_t]
+        print('reals', reals)
+        print('falses', falses)
+        print('ONd_Beam', ONd_Beam)
+    else:
+        ONd_Beam = invN(sky_map)
+    #Test Beam Operator
+
+    #B_sky = B(sky_map)
+    #B_inv_B_sky = B.I(B_sky)  # ou B.T si BeamOperator n'a pas de .I et que B est juste une convolution (auquel cas B.I doit exister si B est inversible, vérifie l'implémentation de BeamOperator)
+
+    #diff = jax.tree.map(lambda a, b: a - b, B(B_inv_B_sky), B(sky_map))
+    #residual_norm = jnp.sqrt(dot_2(diff, diff))
+    #jax.debug.print("résidu B.I(B(x)) - x = {:.6e}", residual_norm)
+
+    #print("ONd.q = ", ONd.q)
+    #jax.debug.print("NaN in ONd ?: {}", jnp.any(jnp.isnan(ONd.q)))
+
     number_components = 3 # CMB, dust, synchrotron
 
     def build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=None):
@@ -480,9 +630,9 @@ def perform_compsep(
 
         Parameters
         ----------
-        invN : BlockDiagonalOperator
-            Inverse noise covariance operator, block_leaves[0] = Q, block_leaves[1] = U.
-            Each block has diagonal of shape (n_freq, n_pix).
+        invN : DiagonalOperator
+            Inverse noise covariance operator, _diagonal[0] = Q, _diagonal[1] = U.
+            Each has shape (n_freq, n_pix).
         matrix_A : jnp.ndarray
             Mixing matrix diagonal, shape (n_freq, n_components, n_pix).
         angles_jnp : jnp.ndarray
@@ -497,8 +647,8 @@ def perform_compsep(
         """
 
         # 1. Extraire la diagonale de invN
-        invN_Q = invN.block_leaves[0]._diagonal
-        invN_U = invN.block_leaves[1]._diagonal
+        invN_Q = invN._diagonal[0]
+        invN_U = invN._diagonal[1]
 
         # 2. Calcul de C.T @ invN @ C
         cos_2a = jnp.cos(2 * angles_jnp).reshape(-1, 1)
@@ -552,8 +702,8 @@ def perform_compsep(
         )
  
     def build_preconditioner(invN, matrix_A, Op, unobserved_pixels=None):
-        invN_Q = invN.block_leaves[0]._diagonal
-        invN_U = invN.block_leaves[1]._diagonal
+        invN_Q = invN._diagonal[0]
+        invN_U = invN._diagonal[1]
 
         M_Q = jnp.einsum('fcp, fp, fkp -> ckp', matrix_A, invN_Q, matrix_A)
         M_U = jnp.einsum('fcp, fp, fkp -> ckp', matrix_A, invN_U, matrix_A)
@@ -576,11 +726,107 @@ def perform_compsep(
 
         return get_preconditioner(
             preconditioner_matrix,
-            in_structure=as_structure(Op.in_structure['cmb'].q)
+            as_structure(Op.in_structure['cmb'])
         )
     
+    def get_A_s_AOND_Beam(params, right_member):
+        """
+            Compute the log-proba given a set of parameters 
+        """
+
+        # Select parameters which are to be estimated 
+        parameters_dict = dict()
+        for param_name in ['temp_dust', 'beta_dust', 'beta_pl']+angles_names:
+            if param_name in params:
+                if param_name in angles_names:
+                    if not use_calibration_matrix:
+                        parameters_dict[param_name] = 0.0
+                    else:
+                        parameters_dict[param_name] = params[param_name]
+                else:
+                    parameters_dict[param_name] = params[param_name]
+            else:
+                parameters_dict[param_name] = fixed_params[param_name]
+
+        if use_calibration_matrix:
+            n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
+            angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])[:, None]
+            C = build_calibration_operator(-angles_jnp, vect_shape)
+            #C = IdentityOperator(in_structure=in_structure_noise_cov)
+            operator_rhs = C.T
+            c_right_member = invN(sky_map)
+            right_member = operator_rhs(c_right_member) # Op ?
+            c_central_freq_op = invN @ C
+            central_freq_op = C.T @ invN @ C
+        elif not use_obsmat:
+            #C = IdentityOperator(in_structure=invN.in_structure)
+            #operator_rhs = C
+            c_right_member = invN(sky_map)
+            #right_member = c_right_member # Op ?
+            c_central_freq_op = invN
+            #central_freq_op = B.T @ real_invN @ B
+            #central_freq_op = B.T @ invN @ B
+            #central_freq_op = invN
+            central_freq_op = real_invN
+
+        # Mixing matrix operator
+        #A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
+        A = create_MixingMatrixOperator(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
+        if use_bandpass:
+              A = (Bp @ A).reduce()
+        # Full right-hand side of the CG equation
+        AOND = A.T(right_member)
+
+        print('AOND : ', AOND)
+
+        if use_calibration_matrix:
+            Op = A.T @ central_freq_op @ A
+            # Construction de matrix_A
+            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
+            for i, component in enumerate(A.block_leaves):
+                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
+            
+            if use_full_sky:
+                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
+            else:
+                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
+            first_central_term = diagonal_central_term(AOND)
+
+        elif not use_obsmat:
+            #Op = A.T @ central_freq_op @ A
+            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
+            for i, component in enumerate(A.block_leaves):
+                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
+
+            #if use_full_sky:
+            #    diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+            #else:
+            #    diagonal_central_term = build_preconditioner(invN, matrix_A, Op)
+
+            Op = A.T @ real_invN @ A
+            #Op = A.T @ invN @ A
+
+            preconditioner = build_preconditioner(real_invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+            #preconditioner = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+
+            diagonal_central_term = (A.T @ central_freq_op @ A).I(
+                solver=lx.GMRES(
+                    rtol=dictionary_parameters_CG['tol_CG'], 
+                    atol=dictionary_parameters_CG['tol_CG'], 
+                    max_steps=dictionary_parameters_CG['max_steps_CG']
+                ), 
+                preconditioner=preconditioner,
+                callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
+            )
+            first_central_term = diagonal_central_term(AOND)
+
+        #jax.debug.print("'first_central_term 2 = {}", first_central_term)
+
+        return A, first_central_term, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term
+
+
     # @equinox.filter_jit
-    def get_A_s_AOND(params):
+    def get_A_s_AOND(params, right_member = ONd):
         """
             Compute the log-proba given a set of parameters 
         """
@@ -616,10 +862,13 @@ def perform_compsep(
             right_member = c_right_member # Op ?
             c_central_freq_op = invN
             central_freq_op = invN
+            C = IdentityOperator(in_structure=invN.in_structure)
 
         # Mixing matrix operator
-        A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
-
+        #A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
+        A = create_MixingMatrixOperator(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
+        if use_bandpass:
+            A = (Bp @ A).reduce()
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
 
@@ -641,7 +890,7 @@ def perform_compsep(
                 # Prepare the preconditioner operator
                 preconditioner = get_preconditioner(
                     preconditioner_matrix, 
-                    in_structure=as_structure(AOND['cmb'].q)
+                    as_structure(AOND['cmb'])
                 )
         if use_preconditioner_pinv:
             print("Using pseudo-inverse preconditioner")
@@ -686,30 +935,41 @@ def perform_compsep(
             
             if use_full_sky:
                 diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
+                #diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
             else:
                 diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
             first_central_term = diagonal_central_term(AOND)
+            #jax.debug.print("NaN in first_central_term ?: {}", jnp.any(jnp.isnan(first_central_term['cmb'].q)))
 
         elif not use_obsmat:
             Op = A.T @ central_freq_op @ A
-            #preconditioner = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
-            preconditioner = IdentityOperator(in_structure=Op.in_structure)
-            diagonal_central_term = (A.T @ central_freq_op @ A).I(
-                solver=lx.CG(
-                    rtol=dictionary_parameters_CG['tol_CG'], 
-                    atol=dictionary_parameters_CG['tol_CG'], 
-                    max_steps=dictionary_parameters_CG['max_steps_CG']
-                ), 
-                preconditioner=preconditioner,
-                callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
-            )
+            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
+            for i, component in enumerate(A.block_leaves):
+                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
+
+            if use_full_sky:
+                diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+            else:
+                diagonal_central_term = build_preconditioner(invN, matrix_A, Op)
+
+            #diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+            #preconditioner = IdentityOperator(in_structure=Op.in_structure)
+            #diagonal_central_term = (A.T @ central_freq_op @ A).I(
+            #    solver=lx.CG(
+            #        rtol=dictionary_parameters_CG['tol_CG'], 
+            #        atol=dictionary_parameters_CG['tol_CG'], 
+            #        max_steps=dictionary_parameters_CG['max_steps_CG']
+            #    ), 
+            #    preconditioner=preconditioner,
+            #    callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
+            #)
             first_central_term = diagonal_central_term(AOND)
             #print('first_central_term 1 = ', first_central_term)
             #jax.debug.print("'first_central_term 1 = {}", first_central_term)
 
         #jax.debug.print("'first_central_term 2 = {}", first_central_term)
 
-        return A, first_central_term, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term
+        return A, first_central_term, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, diagonal_central_term, C
 
     @equinox.filter_custom_jvp
     def spectral_likelihood_custom_gradient(params):
@@ -731,7 +991,7 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        _, map_s, AOND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
+        _, map_s, AOND, _, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
 
         if use_calibration_matrix:
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
@@ -770,7 +1030,7 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        A, map_s, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ = get_A_s_AOND(parameters_dict)
+        A, map_s, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ , _  = get_A_s_AOND(parameters_dict)
 
         if use_calibration_matrix:
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
@@ -785,14 +1045,18 @@ def perform_compsep(
         else:
             logL = -dot_2(AOND, map_s)
 
-        A_deriv = create_MixingMatrixOperator_deriv(
-            frequencies, 
-            parameters_dict, 
-            in_structure_sed, 
-            dust_nu0=dust_nu0, 
-            synchrotron_nu0=synchrotron_nu0, 
-            patch_indices=patch_indices
-        )
+        #A_deriv = create_MixingMatrixOperator_deriv(
+        #    frequencies, 
+        #    parameters_dict, 
+        #    in_structure_sed, 
+        #    dust_nu0=dust_nu0, 
+        #    synchrotron_nu0=synchrotron_nu0, 
+        #    patch_indices=patch_indices
+        #)
+
+        A_deriv = create_MixingMatrixOperator_deriv(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
+        if use_bandpass:
+            A_deriv = {key: (Bp @ op).reduce() for key, op in A_deriv.items()}
 
         keys_params = params.keys()
         final_grad_log = 0
@@ -843,7 +1107,7 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        _, map_s, AOND, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
+        _, map_s, AOND, _, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
 
         if angles_prior_dict is None:
             logL = -dot_2(AOND, map_s)
@@ -905,7 +1169,7 @@ def perform_compsep(
         D = np.diag(scale)
         cov_np_deg = D @ cov_np @ D  # covariance en degrés²
 
-        return cov_np_deg, mean_np, params_names, output_params
+        return cov_np_deg, mean_np, params_names, mean_np
 
     def run_inference(rng_key, initial_position, logprob_fn, num_warmup=100):
             warmup = blackjax.window_adaptation(
@@ -938,7 +1202,7 @@ def perform_compsep(
     def log_prob(params):
         return -spectral_likelihood_custom_gradient(params)
 
-    def do_hmc(n_warmup=300,n_samples = 10000):
+    def do_hmc(n_warmup=1000,n_samples = 10000):
         rng_key = jax.random.PRNGKey(1)
         rng_key, warmup_key, sample_key = jax.random.split(rng_key, 3)
         
@@ -1016,7 +1280,6 @@ def perform_compsep(
     mean_np = None
     
     if do_minimization:
-
         print("Launching minimization!!", flush=True)
         output_params, output_state = minimize(
         spectral_likelihood_custom_gradient,   # 1er argument positionnel, plus fn=
@@ -1030,16 +1293,17 @@ def perform_compsep(
         number_iterations = output_state.iter_num
         print('number ofiterations :', number_iterations)
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
-
         # Ensure these are defined on all code paths to avoid UnboundLocalError
         if use_hessienne:
+            print('Use Hessienne ou quoi ?')
             cov_np, mean_np, params_names, results = Hessienne_plus_corner_plot(output_params)
             output_params = {k: float(results[i]) for i, k in enumerate(params_names)}
         elif use_hmc:
             mc_samples, states, output_params = do_hmc(n_warm, n_samples)
-            #output_params = {k: float(np.mean(np.array(v))) for k, v in states.position.items()}
+            output_params = {k: float(np.mean(np.array(v))) for k, v in states.position.items()}
             params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
                     if p in output_params]
+            number_iterations = 1
         else:
             params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
                     if p in output_params]
@@ -1053,10 +1317,36 @@ def perform_compsep(
         else:
             params_names = [p for p in angles_names + ['temp_dust', 'beta_dust', 'beta_pl']
                     if p in output_params]
+            
+    #output_params = first_guess_params
+    print('Oh')
+    print("Final output parameters:", output_params, flush=True)
 
-    A_maxL, final_maps = get_A_s_AOND(output_params)[:2]
+    #ONd = invN(sky_map)
+    if config.pre_proc_pars.use_real_beams:
+        A_maxL, final_maps, AOND, _, central_freq_op, _, _, diagonal_central_term = get_A_s_AOND_Beam(output_params, right_member=ONd_Beam)
+        #calculate residuals
+        #Op = A_maxL.T @ central_freq_op @ A_maxL
+        #Op_x = Op(final_maps)
+        #diff = jax.tree.map(lambda a, b: a - b, Op_x, AOND)
+        #res_norm = jnp.sqrt(dot_2(diff, diff))
+        #aond_norm = jnp.sqrt(dot_2(AOND, AOND))
+        #jax.block_until_ready(res_norm)
+        #jax.debug.print("résidu absolu = {:.6e}", res_norm)
+        #jax.debug.print("||AOND||      = {:.6e}", aond_norm)
+        #jax.debug.print("résidu relatif = {:.6e}", res_norm / aond_norm)
+        #AON = A_maxL.T @ B.T @ real_invN
+        #W = diagonal_central_term @ AON
+        #W = None
+    else :
+        A_maxL, final_maps, AOND, c_central_freq_op, central_freq_op, _, _, diagonal_central_term, C = get_A_s_AOND(output_params, right_member=ONd)
+        #AON = A_maxL.T @ C.T @ invN
+        #W = diagonal_central_term @ AON
+
+    #W = None
 
     n_pix_retain = pixels_to_retain.size
+            
 
     A_maxL_array = np.zeros((frequencies.size, number_components, n_pix_retain))
     for component in range(number_components):
@@ -1068,6 +1358,52 @@ def perform_compsep(
     final_maps_full_sky = np.zeros((number_components, final_maps_ring.shape[-2], binary_mask.shape[-1]), dtype=final_maps_ring.dtype)
     final_maps_full_sky[..., pixels_to_retain] = final_maps_ring
 
+    #n_angles_W = len([k for k in output_params.keys() if k.startswith('angle_')])
+    #angles_jnp_W = jnp.array(
+    #    [output_params[f'angle_{i}'] for i in range(n_angles_W)]
+    #)[:, None]  # (n_freq, 1)
+
+    #invN_Q = invN_matrix_ring[:, 0, :]  # (n_freq, n_pix)
+    #invN_U = invN_matrix_ring[:, 1, :]  # (n_freq, n_pix)
+
+    #cos_2a = jnp.cos(2 * angles_jnp_W)
+    #sin_2a = jnp.sin(2 * angles_jnp_W)
+
+    #CtinvN_QQ = cos_2a * invN_Q
+    #CtinvN_QU = sin_2a * invN_U
+    #CtinvN_UQ = -sin_2a * invN_Q
+    #CtinvN_UU = cos_2a * invN_U
+
+    #CtinvN = jnp.stack([
+    #    jnp.stack([CtinvN_QQ, CtinvN_QU], axis=0),
+    #    jnp.stack([CtinvN_UQ, CtinvN_UU], axis=0),
+    #], axis=0)  # (s_out, s_in, n_freq, n_pix)
+
+    #matrix_A_W = jnp.asarray(A_maxL_array)  # (n_freq, n_comp, n_pix)
+
+    #M = jnp.einsum('fcp,sSfp,fCp->cCsSp', matrix_A_W, CtinvN, matrix_A_W)
+    #n_comp_W = matrix_A_W.shape[1]
+    #n_pix_W = matrix_A_W.shape[-1]
+    #M_2d = M.transpose(4, 0, 2, 1, 3).reshape(n_pix_W, n_comp_W * 2, n_comp_W * 2)
+
+    #eye_W = jnp.eye(n_comp_W * 2)
+    #if unobserved_pixels is not None and len(unobserved_pixels) > 0:
+    #    M_2d = M_2d.at[unobserved_pixels].set(eye_W)
+
+    #M_inv_2d = jnp.linalg.inv(M_2d)
+    #if unobserved_pixels is not None and len(unobserved_pixels) > 0:
+    #    M_inv_2d = M_inv_2d.at[unobserved_pixels].set(0.0)
+
+    #M_inv_W = M_inv_2d.reshape(n_pix_W, n_comp_W, 2, n_comp_W, 2).transpose(1, 3, 2, 4, 0)
+
+    #AON_W = jnp.einsum('fCp,SifP->CSfiP', matrix_A_W, CtinvN)
+
+    #W_array = np.array(
+    #    jnp.einsum('ccsSp,cSfip->csfip', M_inv_W, AON_W)
+    #)  # (n_comp, s_out, n_freq, s_in, n_pix_retain)
+
+    W_array = None
+
     def W_maxL(input_map):
             
         output_map_truncated = get_A_s_AOND(output_params)[1][...,pixels_to_retain_t]
@@ -1077,8 +1413,9 @@ def perform_compsep(
         output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_ring.dtype)
         
         output_map[..., pixels_to_retain_t] = output_map_ring
+
         for i in range(number_components):
-            output_map[i] = hp.reorder(output_map[i], n2r=True)
+            output_map[i] = output_map[i]
         return output_map
 
     def W_params(params, input_map):
@@ -1087,12 +1424,15 @@ def perform_compsep(
 
         output_map_ring = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
-        output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_nested.dtype)
+        output_map = np.zeros((number_components,output_map_ring.shape[-2], input_map.shape[-1]), dtype=output_map_ring.dtype)
         
         output_map[..., pixels_to_retain_t] = output_map_ring
+        print('nan dans les output_map2 ?', jnp.any(jnp.isnan(output_map)))
         for i in range(number_components):
-            output_map[i] = hp.reorder(output_map[i], n2r=True)
+            output_map[i] = output_map[i]
         return output_map
+    
+    
 
     return Results.from_compsep_results(
         list(output_params.keys()),
@@ -1109,4 +1449,6 @@ def perform_compsep(
         params_names = params_names,
         mc_samples = mc_samples,
         mean_deg = mean_np,
+        #diagonal_central_term = W,
+        W_array = W_array,
     )

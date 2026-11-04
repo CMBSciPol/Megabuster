@@ -1,10 +1,7 @@
 import jax.numpy as jnp
-from astropy.cosmology import Planck15
-from jaxtyping import Array, Float, Int, PyTree
-from scipy import constants
+from jaxtyping import Array, Float
 
-from furax.obs import CMBOperator, DustOperator, SynchrotronOperator
-from furax.obs.operators._seds import MixingMatrixOperator, _H_OVER_K_GHZ, CMBOperator, DustOperator, SynchrotronOperator
+from furax.obs.operators._seds import CMBOperator, DustOperator, SynchrotronOperator, mixing_matrix
 
 __all__ = [
     'create_MixingMatrixOperator',
@@ -19,9 +16,9 @@ single_patch_indices = {
     'beta_dust_patches': None,
     'beta_pl_patches': None,
 }
-def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
+def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=150.0, patch_indices=None):
     """
-    Create a MixingMatrixOperator object using the provided parameters.
+    Create the mixing matrix operator of the CMB, dust and synchrotron, using the provided parameters.
 
     Parameters
     ----------
@@ -30,17 +27,22 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
     parameters_dict: dict
         Dictionary of parameters. Must contain the following
         keys: 'temp_dust', 'beta_dust', and 'beta_pl'.
-    in_structure_sed: equinox.Structure
-        Structure to be provided to the SED object.
+    in_structure_sed: PyTree[jax.ShapeDtypeStruct]
+        Structure of the component maps, without frequency axis, e.g. sky_map.structure_for((n_pix,)).
     dust_nu0: float (optional)
         Dust reference frequency parameter in GHz. Default is 150.0 GHz.
     synchrotron_nu0: float (optional)
-        Synchrotron reference frequency parameter in GHz. Default is 20.0 GHz.
+        Synchrotron reference frequency parameter in GHz. Default is 150.0 GHz.
+    patch_indices: dict (optional)
+        Patch index of each pixel for the keys 'temp_dust_patches', 'beta_dust_patches' and
+        'beta_pl_patches', or None for a parameter uniform over the sky.
+        Default is None, which means that all the parameters are uniform over the sky.
 
     Returns
     -------
-    MixingMatrixOperator
-        Mixing matrix operator object.
+    AbstractLinearOperator
+        Mixing matrix operator, mapping the component maps {'cmb', 'dust', 'synchrotron'} to the
+        frequency maps.
 
     """
     if patch_indices is None:
@@ -65,18 +67,19 @@ def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, 
     )
 
     # Mixing matrix operator
-    return MixingMatrixOperator(cmb=cmb, dust=dust, synchrotron=synchrotron)
+    return mixing_matrix(cmb=cmb, dust=dust, synchrotron=synchrotron)
 
 def create_MixingMatrixOperator_deriv(
         frequencies, 
         parameters_dict, 
         in_structure_sed, 
         dust_nu0=150.0, 
-        synchrotron_nu0=20.0, 
+        synchrotron_nu0=150.0, 
         patch_indices=None
     ):
     """
-    Create a MixingMatrixOperator object using the provided parameters.
+    Create the derivatives of the mixing matrix with respect to the spectral indices, using the
+    provided parameters.
 
     Parameters
     ----------
@@ -85,17 +88,22 @@ def create_MixingMatrixOperator_deriv(
     parameters_dict: dict
         Dictionary of parameters. Must contain the following
         keys: 'temp_dust', 'beta_dust', and 'beta_pl'.
-    in_structure_sed: equinox.Structure
-        Structure to be provided to the SED object.
+    in_structure_sed: PyTree[jax.ShapeDtypeStruct]
+        Structure of the component maps, without frequency axis, e.g. sky_map.structure_for((n_pix,)).
     dust_nu0: float (optional)
         Dust reference frequency parameter in GHz. Default is 150.0 GHz.
     synchrotron_nu0: float (optional)
         Synchrotron reference frequency parameter in GHz. Default is 20.0 GHz.
+    patch_indices: dict (optional)
+        Patch index of each pixel for the keys 'temp_dust_patches', 'beta_dust_patches' and
+        'beta_pl_patches', or None for a parameter uniform over the sky.
+        Default is None, which means that all the parameters are uniform over the sky.
 
     Returns
     -------
-    MixingMatrixOperator
-        Mixing matrix operator object.
+    dict
+        Mixing matrix operators of the derivatives with respect to 'beta_dust' and 'beta_pl'.
+        In each of them, the components whose SED does not depend on the parameter have a zero SED.
 
     """
 
@@ -124,54 +132,63 @@ def create_MixingMatrixOperator_deriv(
     )
 
     # Mixing matrix operator
-    return {'beta_dust':MixingMatrixOperator(cmb=cmb_derivative, dust=dust_derivative, synchrotron=cmb_derivative),
-            'beta_pl':MixingMatrixOperator(cmb=cmb_derivative, dust=cmb_derivative, synchrotron=synchrotron_derivative)}
+    return {'beta_dust':mixing_matrix(cmb=cmb_derivative, dust=dust_derivative, synchrotron=cmb_derivative),
+            'beta_pl':mixing_matrix(cmb=cmb_derivative, dust=cmb_derivative, synchrotron=synchrotron_derivative)}
 
 
 
 class CMBDerivOperator(CMBOperator):
     """
-    Operator for Cosmic Microwave Background (CMB) spectral energy distribution.
+    Operator for the derivative of the Cosmic Microwave Background (CMB) spectral energy
+    distribution with respect to the spectral parameters.
+
+    The CMB SED does not depend on the spectral parameters, so that its derivative is zero. It is
+    also used for the components which do not depend on the parameter of a derivative.
 
     Args:
-        frequencies (Array): Array of frequencies.
+        frequencies (Array): Array of frequencies in GHz.
         in_structure (PyTree): Input structure describing the shape and dtype of the input.
         units (str, optional): Units for the operator ('K_CMB' or 'K_RJ'). Defaults to 'K_CMB'.
 
     Example:
-        >>> from furax.operators.seds import CMBOperator
         >>> import jax.numpy as jnp
-        >>> nu = jnp.array([30, 40, 100])  # Frequencies in GHz
-        >>> in_structure = ...  # Define input structure (e.g., using HealpixLandscape)
-        >>> sky_map = ...  # Define sky map
-        >>> cmbOp = CMBOperator(
+        >>> from furax.obs.landscapes import HealpixLandscape
+        >>> from megabuster.mixingmatrix import CMBDerivOperator
+        >>> nu = jnp.array([30.0, 40.0, 100.0])  # Frequencies in GHz
+        >>> landscape = HealpixLandscape(nside=8, stokes='QU')
+        >>> sky_map = landscape.ones()
+        >>> cmbDerivOp = CMBDerivOperator(
         ...     frequencies=nu,
-        ...     in_structure=in_structure,
+        ...     in_structure=landscape.structure,
         ...     units='K_CMB',
         ... )
-        >>> result = cmbOp(sky_map)
-        >>> print(result)
+        >>> result = cmbDerivOp(sky_map)
+        >>> result.q.shape
+        (3, 768)
+        >>> bool(jnp.all(result.q == 0))
+        True
     """
 
-    def __init__(self, *args, **keywords):
-        super().__init__(*args, **keywords)
-
-    def sed(self) -> Float[Array, '...']:
+    def sed(self) -> Float[Array, 'freq 1']:
         """
-        Compute the spectral energy distribution for the CMB.
+        Compute the derivative of the spectral energy distribution of the CMB, which is zero.
 
         Returns:
-            Float[Array, '...']: The SED for the CMB.
+            Float[Array, 'freq 1']: The derivative of the SED of the CMB.
         """
-        return jnp.zeros_like(self.frequencies) / jnp.expand_dims(self.factor, axis=-1)
+        return jnp.zeros_like(self.frequencies)[:, None]
 
 
 class DustDerivOperator(DustOperator):
     """
-    Operator for dust spectral energy distribution.
+    Operator for the derivative of the dust spectral energy distribution with respect to the
+    spectral index beta.
+
+    The dust SED is proportional to (nu / nu0)^beta, so that its derivative is
+    log(nu / nu0) * SED.
 
     Args:
-        frequencies (Array): Array of frequencies.
+        frequencies (Array): Array of frequencies in GHz.
         frequency0 (float, optional): Reference frequency. Defaults to 100.
         temperature (float | Array): Dust temperature.
         units (str, optional): Units for the operator ('K_CMB' or 'K_RJ'). Defaults to 'K_CMB'.
@@ -183,49 +200,42 @@ class DustDerivOperator(DustOperator):
     Attributes:
         temperature (Array): Dust temperature.
         beta (Array): Spectral index beta.
-        factor (Array | float): Conversion factor based on the unit type.
 
     Example:
-        >>> from furax.operators.seds import SynchrotronOperator
         >>> import jax.numpy as jnp
-        >>> nu = jnp.array([30, 40, 100])  # Frequencies in GHz
-        >>> in_structure = ...  # Define input structure (e.g., using HealpixLandscape)
+        >>> from furax.obs.landscapes import HealpixLandscape
+        >>> from megabuster.mixingmatrix import DustDerivOperator
+        >>> nu = jnp.array([30.0, 40.0, 100.0])  # Frequencies in GHz
+        >>> landscape = HealpixLandscape(nside=8, stokes='QU')
         >>> beta_dust = 1.54  # Spectral index
         >>> temperature = 20.0  # Dust temperature
-        >>> sky_map = ...  # Define sky map
-        >>> dustOperator = SynchrotronOperator(
+        >>> sky_map = landscape.ones()
+        >>> dustDerivOp = DustDerivOperator(
         ...     frequencies=nu,
-        ...     frequency0=20.0,
+        ...     frequency0=150.0,
         ...     beta=beta_dust,
-        ...     temperature=temperature
-        ...     in_structure=in_structure,
+        ...     temperature=temperature,
+        ...     in_structure=landscape.structure,
         ...     units='K_CMB',
         ... )
-        >>> result = dustOperator(sky_map)
-        >>> print(result)
+        >>> result = dustDerivOp(sky_map)
+        >>> result.q.shape
+        (3, 768)
     """
 
-    def __init__(self, *args, **keywords):
-        super().__init__(*args, **keywords)
-
-    def sed(self) -> Float[Array, '...']:
-        t = self._get_at(
-            jnp.expm1(self.frequency0 / self.temperature * _H_OVER_K_GHZ)
-            / jnp.expm1(self.frequencies / self.temperature * _H_OVER_K_GHZ),
-            self.temperature_patch_indices,
-        )
-        b = self._get_at(
-            jnp.log(self.frequencies / self.frequency0) * (self.frequencies / self.frequency0) ** (1 + self.beta), self.beta_patch_indices
-        )
-        sed = (t * b) * jnp.expand_dims(self.factor, axis=-1)
-        return sed
+    def sed(self) -> Float[Array, 'freq pix'] | Float[Array, 'freq 1']:
+        # the SED is proportional to (nu / nu0)^beta: its derivative is log(nu / nu0) * SED
+        nu = self.frequencies[:, None]
+        return jnp.log(nu / self.frequency0) * super().sed()
 
 
 class SynchrotronDerivOperator(SynchrotronOperator):
-    """Spectral Energy Distribution (SED) operator for synchrotron emission.
+    """Operator for the derivative of the synchrotron Spectral Energy Distribution (SED) with
+    respect to the spectral index beta_pl.
 
-    This operator models synchrotron emission based on a power-law SED
-    with optional running of the spectral index.
+    The synchrotron emission is modelled by a power-law SED with optional running of the spectral
+    index, proportional to (nu / nu0)^(beta_pl + running * log(nu / nu_pivot)), so that its
+    derivative is log(nu / nu0) * SED.
 
     Attributes:
         beta_pl (Float[Array, '...']): Power-law spectral index values.
@@ -234,7 +244,6 @@ class SynchrotronDerivOperator(SynchrotronOperator):
         nu_pivot (float): Pivot frequency in GHz for the running spectral index. Default is 1.0 GHz.
         running (float): Running of the spectral index. Default is 0.0.
         units (str): Output unit for the operator, either 'K_CMB' or 'K_RJ'.
-        factor (Float[Array, '...'] | float): Conversion factor between units.
 
     Args:
         frequencies (Float[Array, '...']): Frequencies in GHz.
@@ -249,38 +258,27 @@ class SynchrotronDerivOperator(SynchrotronOperator):
         in_structure (PyTree[jax.ShapeDtypeStruct]): Input structure defining the shape of the data.
 
     Example:
-        >>> from furax.operators.seds import SynchrotronOperator
         >>> import jax.numpy as jnp
-        >>> nu = jnp.array([30, 40, 100])  # Frequencies in GHz
-        >>> in_structure = ...  # Define input structure (e.g., using HealpixLandscape)
-        >>> sky_map = ...  # Define sky map
+        >>> from furax.obs.landscapes import HealpixLandscape
+        >>> from megabuster.mixingmatrix import SynchrotronDerivOperator
+        >>> nu = jnp.array([30.0, 40.0, 100.0])  # Frequencies in GHz
+        >>> landscape = HealpixLandscape(nside=8, stokes='QU')
+        >>> sky_map = landscape.ones()
         >>> beta_pl = -3.0  # Spectral index
-        >>> synchrotron_operator = SynchrotronOperator(
+        >>> synchrotron_deriv_operator = SynchrotronDerivOperator(
         ...     frequencies=nu,
         ...     frequency0=20.0,
         ...     beta_pl=beta_pl,
-        ...     in_structure=in_structure,
+        ...     in_structure=landscape.structure,
         ...     units='K_CMB',
         ... )
-        >>> result = synchrotron_operator(sky_map)
-        >>> print(result)
+        >>> result = synchrotron_deriv_operator(sky_map)
+        >>> result.q.shape
+        (3, 768)
     """
 
-    def __init__(self, *args, **keywords):
-        super().__init__(*args, **keywords)
-
-    def sed(self) -> Float[Array, '...']:
-        sed = self._get_at(
-            (
-                (self.frequencies / self.frequency0)
-                ** (self.beta_pl + self.running * jnp.log(self.frequencies / self.nu_pivot))
-            ),
-            self.beta_pl_patch_indices,
-        )
-
-        sed = self._get_at(
-            jnp.log(self.frequencies / self.frequency0) * (self.frequencies / self.frequency0) ** (self.beta_pl), self.beta_pl_patch_indices
-        )
-        sed *= jnp.expand_dims(self.factor, axis=-1)
-
-        return sed
+    def sed(self) -> Float[Array, 'freq pix'] | Float[Array, 'freq 1']:
+        # the SED is proportional to (nu / nu0)^(beta_pl + running * log(nu / nu_pivot)):
+        # its derivative is log(nu / nu0) * SED
+        nu = self.frequencies[:, None]
+        return jnp.log(nu / self.frequency0) * super().sed()
