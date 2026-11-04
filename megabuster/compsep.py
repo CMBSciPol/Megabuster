@@ -236,6 +236,8 @@ def perform_compsep(
     n_samples = 10000,
     is_noise_map = False,
     use_bandpass = False,
+    distribute = None,
+    members_per_round = None,
     ):
     """
     Perform component separation using the given parameters and data.
@@ -317,6 +319,19 @@ def perform_compsep(
         The values must be 1D arrays of integers containing the indices of the patches for each parameter.
         If a parameter is not to be estimated in patches, its value must be None.
         Default is None, which means that all foregrounds parameters are estimated as single values over the full sky.
+    distribute: str | bool | None (optional)
+        Distribution of the frequency channels over the devices, using the furax ensemble
+        engine: the per-channel contributions to the likelihood are evaluated on the
+        devices and summed across them. Default is None: when several devices are visible
+        and the computation supports it (no patches, observation matrix, real beams, HMC or
+        Hessian), a mesh is installed over the largest number of devices that divides the
+        channels and the computation is distributed; on a single device it runs as before.
+        False disables the distribution; the name of a mesh axis forces it over that axis
+        (`jax.set_mesh` must then be active around the call).
+    members_per_round: int (optional)
+        When distributed, the number of channels of one device evaluated together,
+        vectorized (`Policy.batch`). Default is None: all of them at once, like the
+        non-distributed code; smaller values bound the memory peak.
 
     
     
@@ -620,6 +635,81 @@ def perform_compsep(
     #jax.debug.print("NaN in ONd ?: {}", jnp.any(jnp.isnan(ONd.q)))
 
     number_components = 3 # CMB, dust, synchrotron
+
+    # Distribution of the frequency channels over the devices of a mesh axis: the channels
+    # are the members of a furax ensemble, and their contributions to the likelihood are
+    # summed across the devices by the engine (see megabuster/distributed.py). By default
+    # (distribute=None), the channels are distributed whenever several devices are visible
+    # and the computation supports it; False disables it, a mesh axis name forces it.
+    if distribute is None:
+        supported = (
+            (patch_indices is None or all(v is None for v in patch_indices.values()))
+            and not use_obsmat
+            and not config.pre_proc_pars.use_real_beams
+            and not use_hmc
+            and not use_hessienne
+        )
+        if supported:
+            from megabuster.distributed import auto_mesh_axis
+
+            distribute = auto_mesh_axis(len(frequencies))
+    elif distribute is False:
+        distribute = None
+
+    if distribute is not None:
+        from megabuster.distributed import (
+            build_channel_ensemble,
+            channel_bandpasses,
+            distributed_A_s_AOND,
+            distributed_gradients,
+            minimize_scipy_on_calling_thread,
+        )
+
+        if patch_indices is not None and any(v is not None for v in patch_indices.values()):
+            raise NotImplementedError('distribute does not support patch indices yet.')
+        if use_obsmat or config.pre_proc_pars.use_real_beams:
+            raise NotImplementedError(
+                'distribute does not support the observation matrix or the real beams yet.'
+            )
+        if use_bandpass:
+            channel_nus, channel_weights = channel_bandpasses(
+                [(map_set.frequency, map_set.weight) for map_set in config.map_sets]
+            )
+        else:
+            channel_nus = np.asarray(frequencies, dtype=float)[:, None]
+            channel_weights = np.ones_like(channel_nus)
+        ensemble = build_channel_ensemble(
+            sky_map,
+            invN_matrix_ring,
+            channel_nus,
+            channel_weights,
+            axis=distribute,
+            batch=members_per_round,
+        )
+        if use_full_sky and unobserved_pixels.size:
+            observed_mask = np.ones(n_pix, dtype=bool)
+            observed_mask[unobserved_pixels] = False
+            observed_mask = jnp.asarray(observed_mask)
+        else:
+            observed_mask = None
+
+        def distributed_angles(parameters_dict):
+            if not use_calibration_matrix:
+                return jnp.zeros(len(angles_names))
+            return jnp.array([parameters_dict[name] for name in angles_names])
+
+        def distributed_spectral(parameters_dict):
+            return {key: parameters_dict[key] for key in ('temp_dust', 'beta_dust', 'beta_pl')}
+
+        def distributed_s_AOND(parameters_dict):
+            return distributed_A_s_AOND(
+                ensemble,
+                distributed_angles(parameters_dict),
+                distributed_spectral(parameters_dict),
+                observed_mask,
+                dust_nu0,
+                synchrotron_nu0,
+            )
 
     def build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=None):
         """
@@ -991,7 +1081,10 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        _, map_s, AOND, _, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
+        if distribute is not None:
+            map_s, AOND = distributed_s_AOND(parameters_dict)
+        else:
+            _, map_s, AOND, _, _, _, _, _, _ = get_A_s_AOND(parameters_dict)
 
         if use_calibration_matrix:
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
@@ -1030,7 +1123,10 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
-        A, map_s, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ , _  = get_A_s_AOND(parameters_dict)
+        if distribute is not None:
+            map_s, AOND = distributed_s_AOND(parameters_dict)
+        else:
+            A, map_s, AOND, c_central_freq_op, central_freq_op, c_right_member, right_member, _ , _  = get_A_s_AOND(parameters_dict)
 
         if use_calibration_matrix:
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
@@ -1060,6 +1156,32 @@ def perform_compsep(
 
         keys_params = params.keys()
         final_grad_log = 0
+
+        if distribute is not None:
+            # The per-channel contributions to the gradients, summed over the members by
+            # the ensemble engine; the angle gradients come back with one entry per channel.
+            grads = distributed_gradients(
+                ensemble,
+                distributed_angles(parameters_dict),
+                distributed_spectral(parameters_dict),
+                map_s,
+                dust_nu0,
+                synchrotron_nu0,
+                use_calibration_matrix,
+            )
+            for key in keys_params:
+                if key.startswith('angle'):
+                    if not use_calibration_matrix:
+                        continue
+                    i = int(key.split('_')[1])
+                    if priors_dict[key] is not None:
+                        grad_prior = 2 * angles_diff[i] / priors_dict[key]**2
+                    else:
+                        grad_prior = 0
+                    final_grad_log += (grads['angle'][i] + grad_prior) * beta_tau[key]
+                else:
+                    final_grad_log += grads[key] * beta_tau[key]
+            return logL, final_grad_log
 
         if use_calibration_matrix:
             c_left_hand_term = c_right_member - (c_central_freq_op @ A)(map_s)
@@ -1281,14 +1403,25 @@ def perform_compsep(
     
     if do_minimization:
         print("Launching minimization!!", flush=True)
-        output_params, output_state = minimize(
-        spectral_likelihood_custom_gradient,   # 1er argument positionnel, plus fn=
-        init_params=first_guess_params,
-        solver_name=solver_name,
-        max_iter=config.parametric_sep_pars.megabuster_options.max_iter,
-        rtol=1e-25,
-        atol=0.0,
-        )
+        if distribute is not None and solver_name.startswith('scipy'):
+            # The host callback of the scipy solvers of furax_cs evaluates the likelihood
+            # from a thread that does not see the mesh of the ensemble: run the same jaxopt
+            # solver on the calling thread instead.
+            output_params, output_state = minimize_scipy_on_calling_thread(
+                spectral_likelihood_custom_gradient,
+                first_guess_params,
+                solver_name,
+                config.parametric_sep_pars.megabuster_options.max_iter,
+            )
+        else:
+            output_params, output_state = minimize(
+            spectral_likelihood_custom_gradient,   # 1er argument positionnel, plus fn=
+            init_params=first_guess_params,
+            solver_name=solver_name,
+            max_iter=config.parametric_sep_pars.megabuster_options.max_iter,
+            rtol=1e-25,
+            atol=0.0,
+            )
         print('output_params :', output_params)
         number_iterations = output_state.iter_num
         print('number ofiterations :', number_iterations)
@@ -1322,8 +1455,36 @@ def perform_compsep(
     print('Oh')
     print("Final output parameters:", output_params, flush=True)
 
+    def resolve_parameters(params):
+        parameters_dict = dict()
+        for param_name in ['temp_dust', 'beta_dust', 'beta_pl'] + angles_names:
+            if param_name in params:
+                parameters_dict[param_name] = params[param_name]
+            else:
+                parameters_dict[param_name] = fixed_params[param_name]
+        return parameters_dict
+
+    def compute_component_maps(params):
+        """The component maps at `params`, whichever the execution mode."""
+        if distribute is not None:
+            return distributed_s_AOND(resolve_parameters(params))[0]
+        return get_A_s_AOND(params)[1]
+
     #ONd = invN(sky_map)
-    if config.pre_proc_pars.use_real_beams:
+    if distribute is not None:
+        final_maps = compute_component_maps(output_params)
+        # The mixing matrix at the fitted parameters, only used for the output A_maxL array
+        A_maxL = create_MixingMatrixOperator(
+            frequencies_mixing,
+            resolve_parameters(output_params),
+            in_structure_sed,
+            dust_nu0=dust_nu0,
+            synchrotron_nu0=synchrotron_nu0,
+            patch_indices=patch_indices,
+        )
+        if use_bandpass:
+            A_maxL = (Bp @ A_maxL).reduce()
+    elif config.pre_proc_pars.use_real_beams:
         A_maxL, final_maps, AOND, _, central_freq_op, _, _, diagonal_central_term = get_A_s_AOND_Beam(output_params, right_member=ONd_Beam)
         #calculate residuals
         #Op = A_maxL.T @ central_freq_op @ A_maxL
@@ -1405,8 +1566,8 @@ def perform_compsep(
     W_array = None
 
     def W_maxL(input_map):
-            
-        output_map_truncated = get_A_s_AOND(output_params)[1][...,pixels_to_retain_t]
+
+        output_map_truncated = jax.tree.map(lambda x: x[..., pixels_to_retain_t], compute_component_maps(output_params))
 
         output_map_ring = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
@@ -1420,7 +1581,7 @@ def perform_compsep(
 
     def W_params(params, input_map):
 
-        output_map_truncated = get_A_s_AOND(params)[1][...,pixels_to_retain_t]
+        output_map_truncated = jax.tree.map(lambda x: x[..., pixels_to_retain_t], compute_component_maps(params))
 
         output_map_ring = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
