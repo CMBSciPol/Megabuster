@@ -30,6 +30,7 @@ would act inside the member body, between the SEDs and the noise weighting, leav
 member layout and the reductions unchanged.
 """
 
+import dataclasses
 from functools import partial
 
 import jax
@@ -149,11 +150,12 @@ def channel_bandpasses(bandpasses, units='K_CMB'):
     return np.stack(nus), np.stack(ws)
 
 
-def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None, batch=None):
+def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None):
     """Build the ensemble of the frequency channels, laid out over a mesh axis.
 
-    The sky maps keep the layout of the caller: `axes` tells the engine where the member
-    axis of each leaf is, so nothing is transposed.
+    The inputs keep the layout of the caller: `axes` tells the engine where the member axis
+    of each leaf is, so nothing is transposed. The channels of a device are evaluated
+    together, vectorized, as the non-distributed code does.
 
     Args:
         sky_map: The sky maps, `StokesQU` of `q` and `u` of shape `(n_channels, n_pix)`,
@@ -164,8 +166,6 @@ def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None, b
         weights: The integration weights of each channel, `(n_channels, n_samp)`.
         axis: The mesh axis the channels are split over (`jax.set_mesh` must be active),
             or None to keep the ensemble on a single device.
-        batch: The channels of one device evaluated together, vectorized. None evaluates
-            all of them at once, like the non-distributed code.
 
     Returns:
         The `StackedEnsemble` of the channels.
@@ -182,23 +182,12 @@ def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None, b
         'index': jnp.arange(n_channels),
     }
     axes = {'d': 1, 'invN': 0, 'nu': 0, 'w': 0, 'index': 0}
-    devices = 1
-    if axis is not None:
-        mesh = jax.sharding.get_abstract_mesh()
-        if mesh.empty or axis not in mesh.shape:
-            raise ValueError(f'no mesh axis {axis!r} is set: use `jax.set_mesh`.')
-        devices = mesh.shape[axis]
-        if n_channels % devices:
-            raise ValueError(f'{devices} devices do not divide {n_channels} channels.')
-    per_device = n_channels // devices
-    if batch is None:
-        batch = per_device
-    if per_device % batch:
-        raise ValueError(f'rounds of {batch} members do not divide {per_device} members.')
-    ensemble = StackedEnsemble(n_channels, stacked, axes=axes, policy=Policy(batch=batch))
+    ensemble = StackedEnsemble(n_channels, stacked, axes=axes)
     if axis is not None:
         ensemble = ensemble.shard(axis)
-    return ensemble
+    return dataclasses.replace(
+        ensemble, policy=Policy(axis=ensemble.policy.axis, batch=ensemble.size_per_device)
+    )
 
 
 def _effective_seds(nu, w, spectral, dust_nu0, synchrotron_nu0, derivatives=False):
