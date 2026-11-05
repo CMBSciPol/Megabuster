@@ -367,11 +367,12 @@ def perform_compsep(
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
 
     # The channels are the members of furax ensembles, laid out over the devices whenever
-    # several are available: the members of an ensemble are the slices of the leading axis
-    # of its leaves, so a stacked map of the channels is channel-first, of shape
-    # (n_freq, n_stokes, n_pix). A user-provided operator acts on the Stokes-first maps of
-    # the public API, (n_stokes, n_freq, n_pix), and couples the channels: it is wrapped
-    # between relayout adapters and the computation stays on a single device.
+    # several are available: the block composites slice their input per member through
+    # `Ensemble.zip`, which takes the member axis leading, so the maps they consume are
+    # channel-first, of shape (n_freq, n_stokes, n_pix). A user-provided operator acts on
+    # the Stokes-first maps of the public API, (n_stokes, n_freq, n_pix), and couples the
+    # channels: it is wrapped between relayout adapters and the computation stays on a
+    # single device.
     frequencies = np.asarray(frequencies, dtype=np.float64)
     n_freq = frequencies.size
     has_coupling_operators = (
