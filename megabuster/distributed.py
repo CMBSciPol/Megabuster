@@ -152,8 +152,12 @@ def channel_bandpasses(bandpasses, units='K_CMB'):
 def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None, batch=None):
     """Build the ensemble of the frequency channels, laid out over a mesh axis.
 
+    The sky maps keep the layout of the caller: `axes` tells the engine where the member
+    axis of each leaf is, so nothing is transposed.
+
     Args:
-        sky_map: The sky maps, `StokesQU` with leaves of shape `(n_channels, n_pix)`.
+        sky_map: The sky maps, `StokesQU` of `q` and `u` of shape `(n_channels, n_pix)`,
+            backed by one array `(n_stokes, n_channels, n_pix)` whose member axis is 1.
         invN_diagonal: The diagonals of the inverse noise covariances, of shape
             `(n_channels, 2, n_pix)` with Q and U.
         nus: The integration frequencies of each channel, `(n_channels, n_samp)` [GHz].
@@ -168,14 +172,16 @@ def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None, b
     """
     n_channels = nus.shape[0]
     stacked = {
-        # a Stokes object is backed by one array of shape (n_stokes, ...): the member axis
-        # is moved in front and the member rebuilds its StokesQU with `from_array`
-        'd': jnp.stack([jnp.asarray(sky_map.q), jnp.asarray(sky_map.u)], axis=1),
+        # a Stokes object is backed by one array of shape (n_stokes, n_channels, n_pix):
+        # `axes` puts its member axis where it already is, so the engine slices, batches
+        # and shards it in place and a member is a plain StokesQU of one channel
+        'd': sky_map,
         'invN': jnp.asarray(invN_diagonal),
         'nu': jnp.asarray(nus, dtype=float),
         'w': jnp.asarray(weights, dtype=float),
         'index': jnp.arange(n_channels),
     }
+    axes = {'d': 1, 'invN': 0, 'nu': 0, 'w': 0, 'index': 0}
     devices = 1
     if axis is not None:
         mesh = jax.sharding.get_abstract_mesh()
@@ -189,7 +195,7 @@ def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None, b
         batch = per_device
     if per_device % batch:
         raise ValueError(f'rounds of {batch} members do not divide {per_device} members.')
-    ensemble = StackedEnsemble(n_channels, stacked, policy=Policy(batch=batch))
+    ensemble = StackedEnsemble(n_channels, stacked, axes=axes, policy=Policy(batch=batch))
     if axis is not None:
         ensemble = ensemble.shard(axis)
     return ensemble
@@ -254,7 +260,7 @@ def _primal_member(member, angles, spectral, *, dust_nu0, synchrotron_nu0):
         member['nu'], member['w'], spectral, dust_nu0, synchrotron_nu0
     )
     angle = angles[member['index']]
-    d = StokesQU.from_array(member['d'])
+    d = member['d']
     invN_q, invN_u = member['invN'][0], member['invN'][1]
     nd = StokesQU(invN_q * d.q, invN_u * d.u)
     right_member = rotate_qu(nd, angle)  # C.T (N^-1 d)
@@ -297,7 +303,7 @@ def _grad_member(member, angles, spectral, s, *, dust_nu0, synchrotron_nu0, use_
         member['nu'], member['w'], spectral, dust_nu0, synchrotron_nu0, derivatives=True
     )
     angle = angles[member['index']]
-    d = StokesQU.from_array(member['d'])
+    d = member['d']
     invN_q, invN_u = member['invN'][0], member['invN'][1]
     a_s = _combine(sed, s)  # A s
     ca_s = rotate_qu(a_s, -angle)  # C (A s)
