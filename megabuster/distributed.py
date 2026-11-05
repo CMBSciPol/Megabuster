@@ -7,13 +7,17 @@ term to `AdditionOperator(ensemble of A_fᵀ N_f⁻¹ A_f)`, whose conjugate gra
 per-channel contributions through the ensemble engine. When several devices are visible,
 `auto_mesh_axis` installs a 1D mesh and the ensembles are sharded over it: each device then
 evaluates its own channels and the sums become cross-device reductions. On a single device
-the same expressions run vectorized, like the legacy code.
+the same expressions run vectorized, as the sequential code did.
 
-In this layout, a stacked map of the channels carries the channel axis first,
-`(n_channels, n_stokes, n_pix)`, one member per entry — the transpose of the legacy furax
-layout `(n_stokes, n_channels, n_pix)`. A user-provided operator in the legacy layout (an
-observation matrix, a central operator) is wrapped between `RelayoutOperator` adapters and
-forces the single-device path, since it couples the channels.
+Two layouts of a multi-channel map meet here. The public API of `perform_compsep` is
+Stokes-first, data `(n_stokes, n_channels, n_pix)`, and keeps it. The members of an
+ensemble are the slices of the leading axis of its leaves, so a stacked map of the channels
+is channel-first, `(n_channels, n_stokes, n_pix)`, one member per entry. (This is a
+convention of the furax ensemble engine, not a constraint of JAX: a `PartitionSpec` shards
+any axis, and the channel axis of a Stokes-first map could be sharded in place.) A
+user-provided operator acting on Stokes-first maps — an observation matrix, a central
+operator — is therefore wrapped between `RelayoutOperator` adapters; it also forces the
+single-device path, since it couples the channels.
 """
 
 import jax
@@ -105,7 +109,7 @@ def shard_ensemble(ensemble, axis):
 
 
 def stack_channel_maps(stokes, axis):
-    """A legacy Stokes map of the channels, re-laid out with the channel axis first.
+    """A Stokes-first map of the channels, re-laid out with the channel axis first.
 
     The returned container is the stacked form of the ensemble of the channel maps: its
     data has shape `(n_channels, n_stokes, n_pix)`, laid out over the mesh axis when given.
@@ -131,9 +135,9 @@ def member_mixing_operator(
 
     The SEDs are those of `create_MixingMatrixOperator` evaluated at the channel's
     frequency; the operator maps `{'cmb', 'dust', 'synchrotron'}` component maps of the
-    member structure to a single channel map, without the legacy frequency axis.
+    member structure to a single channel map, without a frequency axis.
     """
-    legacy = create_MixingMatrixOperator(
+    multi_channel = create_MixingMatrixOperator(
         nu,
         parameters_dict,
         structure,
@@ -144,7 +148,7 @@ def member_mixing_operator(
     return BlockRowOperator(
         {
             component: DiagonalOperator(diagonal, in_structure=structure)
-            for component, diagonal in _member_diagonals(legacy.blocks).items()
+            for component, diagonal in _member_diagonals(multi_channel.blocks).items()
         }
     )
 
@@ -153,7 +157,7 @@ def member_mixing_operator_deriv(
     nu, parameters_dict, structure, dust_nu0, synchrotron_nu0, patch_indices
 ):
     """The derivatives of the mixing matrix of one channel, keyed by spectral parameter."""
-    legacy = create_MixingMatrixOperator_deriv(
+    multi_channel = create_MixingMatrixOperator_deriv(
         nu,
         parameters_dict,
         structure,
@@ -168,7 +172,7 @@ def member_mixing_operator_deriv(
                 for component, diagonal in _member_diagonals(operator.blocks).items()
             }
         )
-        for key, operator in legacy.items()
+        for key, operator in multi_channel.items()
     }
 
 
@@ -176,8 +180,8 @@ def sed_matrix_from_ensemble(a_ensemble, n_pix, components=COMPONENTS):
     """The mixing matrix of an ensemble of per-channel operators, as a replicated array.
 
     Returns the SEDs as an array of shape `(n_channels, n_components, n_pix)`, the layout of
-    `get_array_from_A`, so that the preconditioner computations of the legacy code apply
-    unchanged: the mesh axes are `Auto`, the compiler inserts the gathers where needed.
+    `get_array_from_A`, so that the preconditioner computations apply unchanged: the mesh
+    axes are `Auto`, the compiler inserts the gathers where needed.
     """
     blocks = a_ensemble.stacked.blocks
     return jnp.stack(
@@ -190,12 +194,13 @@ def sed_matrix_from_ensemble(a_ensemble, n_pix, components=COMPONENTS):
 
 
 class RelayoutOperator(AbstractLinearOperator):
-    """Permutation from the stacked channel layout to the legacy layout.
+    """Permutation from the channel-first layout to the Stokes-first layout.
 
     It maps a stacked map of the channels, data `(n_channels, n_stokes, n_pix)`, to the
-    legacy furax layout, data `(n_stokes, n_channels, n_pix)`: a user-provided operator `M`
-    acting on legacy maps applies to stacked maps as `R.T @ M @ R`. The permutation is
-    orthogonal, but not square: the input and output structures differ.
+    Stokes-first layout of the public API, data `(n_stokes, n_channels, n_pix)`: a
+    user-provided operator `M` acting on Stokes-first maps applies to stacked maps as
+    `R.T @ M @ R`. The permutation is orthogonal, but not square: the input and output
+    structures differ.
     """
 
     def mv(self, x):
