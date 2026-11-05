@@ -75,6 +75,8 @@ def load_matrix_precond(
         path_matrix_eigen_decomp, 
         nstokes=2,
         power_diagonal=-1,
+        diagonal_array_fill=None,
+        n_pix_diagonal=None
     ):
     """
     Load the preconditioner matrix from a file.
@@ -104,11 +106,34 @@ def load_matrix_precond(
         logger.info(f"Building and loading matrix eigen decomposition from the list of paths {path_matrix_eigen_decomp}")
         
         n_freq = len(path_matrix_eigen_decomp)
+
+        if None in path_matrix_eigen_decomp:
+            logger.warning(f"## One of the paths in {path_matrix_eigen_decomp} is None, diagonal_array_fill will be used to fill the missing matrix.")
+            if diagonal_array_fill is None:
+                logger.warning(f"## diagonal_array_fill is None, filling with ones instead over {n_pix_diagonal} pixels.")
+
+                assert n_pix_diagonal is not None, "n_pix_diagonal must be provided if diagonal_array_fill is None."
+
+                diagonal_array_fill = np.broadcast_to(1.0, (n_freq,nstokes,n_pix_diagonal))
+            else:
+                assert diagonal_array_fill.shape[0] == n_freq, "The first dimension of diagonal_array_fill must match the number of frequencies."
+                assert diagonal_array_fill.shape[1] == nstokes, "The second dimension of diagonal_array_fill must match the number of Stokes parameters."
+                if n_pix_diagonal is not None:
+                    assert diagonal_array_fill.shape[2] == n_pix_diagonal, f"The third dimension of diagonal_array_fill which is {diagonal_array_fill.shape[2]} must match the number of pixels in the diagonal provided {n_pix_diagonal}."
+                else:
+                    n_pix_diagonal = diagonal_array_fill.shape[2] 
+                
         
         array_eigvals = []
         array_eigvecs = []
 
         for idx_freq in range(n_freq):
+            if path_matrix_eigen_decomp[idx_freq] is None:
+                logger.warning(f"## Path {path_matrix_eigen_decomp[idx_freq]} is None, filling with diagonal_array_fill instead.")
+                array_eigvals.append(jnp.array(diagonal_array_fill[idx_freq].ravel()))
+                array_eigvecs.append(jnp.identity(nstokes * n_pix_diagonal))
+                continue
+
             logger.info(f'Loading matrix eigen decomposition from {path_matrix_eigen_decomp[idx_freq]}')
             add_ = ''
             if not str(path_matrix_eigen_decomp[idx_freq]).endswith('.npz'):
@@ -119,6 +144,9 @@ def load_matrix_precond(
             eigvecs = dictionary_eig['eigvecs']
 
             n_pix = eigvals.shape[-1] // nstokes
+
+            if n_pix_diagonal is not None:
+                assert n_pix_diagonal == n_pix, f"n_pix_diagonal ({n_pix_diagonal}) must be equal to the number of pixels in the matrix ({n_pix})."
 
             array_eigvecs.append(eigvecs)
             array_eigvals.append(eigvals)

@@ -78,19 +78,27 @@ def compute_eigenspectrum_from_matrices(
 
     eigh_jitted = jax.jit(jax.numpy.linalg.eigh, static_argnames=['UPLO', 'symmetrize_input'])
     for idx_freq in range(n_freq):
-        path_save = path_output+str(list_name_output[idx_freq])
-        if not path_save.endswith('.npz'):
-            path_save += '.npz'
-        if os.path.exists(path_save):
-            logger.warning(f"## File {path_save} already exists, skipping computation.")
-            continue
+        if path_output is not None and list_name_output[idx_freq] is not None:
+            path_save = path_output+str(list_name_output[idx_freq])
+            if not path_save.endswith('.npz'):
+                path_save += '.npz'
+            if os.path.exists(path_save):
+                logger.warning(f"## File {path_save} already exists, skipping computation.")
+                continue
+        else:
+            logger.warning(f"## Path {path_output} or name {list_name_output[idx_freq]} is None, skipping computation.")
+            path_save = None
+        
         
         invN_nested = hp.reorder(inverse_noisecov_QU_ring[idx_freq], r2n=True)[...,mask_B_nest!=0].ravel()
 
         if idx_freq in indices_freq_not_filtered:
             logger.warning(f"Skipping computation for frequency index {idx_freq} as it is in the list of frequencies not filtered, storing instead N^-1 (diagonal).")
 
-            
+            if path_save is None:
+                logger.warning(f"## Path {path_save} is None, skipping storing.")
+                continue
+
             
             logger.info(f"Saving to: {path_save}")
             # eigvals = np.ones(nstokes * n_pix_masked)
