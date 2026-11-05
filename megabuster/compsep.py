@@ -10,14 +10,14 @@ from typing import Callable
 
 import operator
 
-from furax.core import (
+from furax import (
     BlockColumnOperator,
     BlockDiagonalOperator,
     DiagonalOperator,
     IdentityOperator,
     MoveAxisOperator,
-    lift,
 )
+from furax.core import lift
 from furax.obs.stokes import Stokes
 
 from cadre import minimize, SOLVER_NAMES
