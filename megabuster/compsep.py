@@ -237,7 +237,6 @@ def perform_compsep(
     is_noise_map = False,
     use_bandpass = False,
     distribute = None,
-    members_per_round = None,
     ):
     """
     Perform component separation using the given parameters and data.
@@ -328,10 +327,6 @@ def perform_compsep(
         channels and the computation is distributed; on a single device it runs as before.
         False disables the distribution; the name of a mesh axis forces it over that axis
         (`jax.set_mesh` must then be active around the call).
-    members_per_round: int (optional)
-        When distributed, the number of channels of one device evaluated together,
-        vectorized (`Policy.batch`). Default is None: all of them at once, like the
-        non-distributed code; smaller values bound the memory peak.
 
     
     
@@ -684,7 +679,6 @@ def perform_compsep(
             channel_nus,
             channel_weights,
             axis=distribute,
-            batch=members_per_round,
         )
         if use_full_sky and unobserved_pixels.size:
             observed_mask = np.ones(n_pix, dtype=bool)
