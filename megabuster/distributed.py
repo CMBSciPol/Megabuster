@@ -9,22 +9,16 @@ per-channel contributions through the ensemble engine. When several devices are 
 evaluates its own channels and the sums become cross-device reductions. On a single device
 the same expressions run vectorized, as the sequential code did.
 
-Two layouts of a multi-channel map meet here. The public API of `perform_compsep` is
-Stokes-first, data `(n_stokes, n_channels, n_pix)`, and keeps it. The block composites hand
-each block its slice of their input through `Ensemble.zip`, which takes the member axis
-leading, so the maps they consume and return are channel-first,
-`(n_channels, n_stokes, n_pix)`, one member per entry. (`StackedEnsemble` itself accepts
-`axes`, the member axis of each leaf, so an ensemble built here could read a Stokes-first
-map in place; only the composites still require the leading axis.) A user-provided operator
-acting on Stokes-first maps — an observation matrix, a central operator — is therefore
-conjugated by furax's `MoveAxisOperator`, `R.T @ M @ R`; it also forces the single-device
-path, since it couples the channels. The permutation preserves the sharding, so it is
-device-local.
+A multi-channel map keeps one layout throughout, the one of the public API of
+`perform_compsep`: a `Stokes` container whose data is `(n_stokes, n_channels, n_pix)`. The
+block composites are built with `axes=1`, the member axis of their stacked sides, so the
+engine slices, stacks and shards the channel axis in place: nothing is transposed, and a
+user-provided operator — an observation matrix, a central operator — applies to the maps
+directly.
 """
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
 
 from furax import BlockRowOperator, DiagonalOperator
 from furax.core import StackedEnsemble
@@ -38,7 +32,6 @@ __all__ = [
     'auto_mesh_axis',
     'channel_ensemble',
     'shard_ensemble',
-    'stack_channel_maps',
     'member_mixing_operator',
     'member_mixing_operator_deriv',
     'sed_matrix_from_ensemble',
@@ -102,20 +95,6 @@ def shard_ensemble(ensemble, axis):
     if axis is None:
         return ensemble
     return ensemble.shard(axis)
-
-
-def stack_channel_maps(stokes, axis):
-    """A Stokes-first map of the channels, re-laid out with the channel axis first.
-
-    The returned container is the stacked form of the ensemble of the channel maps: its
-    data has shape `(n_channels, n_stokes, n_pix)`, laid out over the mesh axis when given.
-    """
-    # built leaf-wise: the stacked container is not a valid Stokes object (its leading axis
-    # is the channel, not the Stokes axis), it is the member pytree with stacked leaves
-    stacked = jax.tree.map(lambda leaf: jnp.moveaxis(jnp.asarray(leaf), 1, 0), stokes)
-    if axis is not None:
-        stacked = jax.tree.map(lambda leaf: jax.device_put(leaf, P(axis)), stacked)
-    return stacked
 
 
 def _member_diagonals(operator_blocks):
