@@ -16,14 +16,13 @@ from furax import (
     DiagonalOperator,
     IdentityOperator,
 )
-from furax.core import lift
+from furax.core import StackedEnsemble, lift
 from furax.obs.stokes import Stokes
 
 from furax_cs import minimize, SOLVER_NAMES
 
 from megabuster.distributed import (
     auto_mesh_axis,
-    channel_ensemble,
     member_mixing_operator,
     member_mixing_operator_deriv,
     minimize_scipy_on_calling_thread,
@@ -371,28 +370,17 @@ def perform_compsep(
     # applies to it directly.
     frequencies = np.asarray(frequencies, dtype=np.float64)
     n_freq = frequencies.size
-    has_coupling_operators = (
-        central_freq_op is not None
-        or obs_mat_operator is not None
-        or obsmat_operator_rhs is not None
-    )
     mesh_axis = auto_mesh_axis(n_freq)
 
-    nu_ensemble = channel_ensemble({'nu': frequencies[:, None]})
-    invN_blocks = BlockDiagonalOperator(
-        shard_ensemble(
-            lift(
-                lambda member: DiagonalOperator(member['invN'], in_structure=in_structure_sed),
-                channel_ensemble({'invN': invN_matrix_nested}),
-            ),
-            mesh_axis,
-        ),
-        axes=1,
-    )
+    nu_ensemble = StackedEnsemble(n_freq, {'nu': frequencies[:, None]})
 
     # Precompute part of the right-hand side of the CG equation
     print("Precomputing the right-hand side of the CG equation . . .", flush=True)
-    if has_coupling_operators:
+    if (
+        central_freq_op is not None
+        or obs_mat_operator is not None
+        or obsmat_operator_rhs is not None
+    ):
         invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
         if obs_mat_operator is None:
             obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
@@ -409,10 +397,18 @@ def perform_compsep(
 
     else:
         # O is the identity: the central operator is block-diagonal over the channels
-        central_apply = invN_blocks
-
-        def stacked_rhs(stokes_first_map):
-            return invN_blocks(stokes_first_map)
+        central_apply = stacked_rhs = BlockDiagonalOperator(
+            shard_ensemble(
+                lift(
+                    lambda member: DiagonalOperator(
+                        member['invN'], in_structure=in_structure_sed
+                    ),
+                    StackedEnsemble(n_freq, {'invN': invN_matrix_nested}),
+                ),
+                mesh_axis,
+            ),
+            axes=1,
+        )
 
     ONd = stacked_rhs(sky_map)
     jax.block_until_ready(ONd)
