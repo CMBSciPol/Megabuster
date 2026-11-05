@@ -17,20 +17,19 @@ leading, so the maps they consume and return are channel-first,
 `axes`, the member axis of each leaf, so an ensemble built here could read a Stokes-first
 map in place; only the composites still require the leading axis.) A user-provided operator
 acting on Stokes-first maps — an observation matrix, a central operator — is therefore
-wrapped between `RelayoutOperator` adapters; it also forces the single-device path, since
-it couples the channels. The permutation preserves the sharding, so it is device-local.
+conjugated by furax's `MoveAxisOperator`, `R.T @ M @ R`; it also forces the single-device
+path, since it couples the channels. The permutation preserves the sharding, so it is
+device-local.
 """
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from furax import AbstractLinearOperator
 from furax.core import (
     BlockRowOperator,
     DiagonalOperator,
     StackedEnsemble,
-    TransposeOperator,
 )
 
 from megabuster.mixingmatrix import (
@@ -46,7 +45,6 @@ __all__ = [
     'member_mixing_operator',
     'member_mixing_operator_deriv',
     'sed_matrix_from_ensemble',
-    'RelayoutOperator',
     'minimize_scipy_on_calling_thread',
 ]
 
@@ -192,28 +190,6 @@ def sed_matrix_from_ensemble(a_ensemble, n_pix, components=COMPONENTS):
         ],
         axis=1,
     )
-
-
-class RelayoutOperator(AbstractLinearOperator):
-    """Permutation from the channel-first layout to the Stokes-first layout.
-
-    It maps a stacked map of the channels, data `(n_channels, n_stokes, n_pix)`, to the
-    Stokes-first layout of the public API, data `(n_stokes, n_channels, n_pix)`: a
-    user-provided operator `M` acting on Stokes-first maps applies to stacked maps as
-    `R.T @ M @ R`. The permutation is orthogonal, but not square: the input and output
-    structures differ.
-    """
-
-    def mv(self, x):
-        return jax.tree.map(lambda leaf: jnp.moveaxis(leaf, 0, 1), x)
-
-    def transpose(self):
-        return RelayoutTransposeOperator(operator=self)
-
-
-class RelayoutTransposeOperator(TransposeOperator):
-    def mv(self, x):
-        return jax.tree.map(lambda leaf: jnp.moveaxis(leaf, 1, 0), x)
 
 
 def minimize_scipy_on_calling_thread(fn, init_params, solver_name, max_iter, tol=None):

@@ -15,6 +15,7 @@ from furax.core import (
     BlockDiagonalOperator,
     DiagonalOperator,
     IdentityOperator,
+    MoveAxisOperator,
     lift,
 )
 from furax.obs.stokes import Stokes
@@ -22,7 +23,6 @@ from furax.obs.stokes import Stokes
 from cadre import minimize, SOLVER_NAMES
 
 from megabuster.distributed import (
-    RelayoutOperator,
     auto_mesh_axis,
     channel_ensemble,
     member_mixing_operator,
@@ -404,8 +404,10 @@ def perform_compsep(
         if central_freq_op is None:
             central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
 
-        relayout = RelayoutOperator(
-            in_structure=jax.eval_shape(lambda x: stack_channel_maps(x, None), sky_map)
+        # the channel axis back to where the public API has it: the composites consume
+        # channel-first maps, the user-provided operator acts on Stokes-first ones
+        relayout = MoveAxisOperator(
+            0, 1, in_structure=jax.eval_shape(lambda x: stack_channel_maps(x, None), sky_map)
         )
         # O.T N^-1 O conjugated into the channel-first layout
         central_apply = relayout.T @ central_freq_op @ relayout
