@@ -21,7 +21,6 @@ import jax
 import jax.numpy as jnp
 
 from furax import BlockRowOperator, DiagonalOperator
-from furax.core import StackedEnsemble
 
 from megabuster.mixingmatrix import (
     create_MixingMatrixOperator,
@@ -30,7 +29,6 @@ from megabuster.mixingmatrix import (
 
 __all__ = [
     'auto_mesh_axis',
-    'channel_ensemble',
     'shard_ensemble',
     'member_mixing_operator',
     'member_mixing_operator_deriv',
@@ -61,7 +59,7 @@ def auto_mesh_axis(n_channels):
             return mesh.axis_names[0] if mesh.devices.size > 1 else None
         print(
             f'The installed mesh {mesh} cannot lay out the {n_channels} channels '
-            f'(one Auto axis dividing them is needed): running on a single device.',
+            f'(one Auto axis dividing them is needed): the channels are not distributed.',
             flush=True,
         )
         return None
@@ -77,17 +75,6 @@ def auto_mesh_axis(n_channels):
     )
     jax.set_mesh(jax.make_mesh((n_devices,), ('freq',), devices=devices, axis_types=(auto,)))
     return 'freq'
-
-
-def channel_ensemble(arrays):
-    """The ensemble of the channels from a dict of arrays with a leading channel axis.
-
-    The ensemble is not laid out over the mesh: `lift` vectorizes its body by fetching one
-    member, which an already-sharded ensemble cannot provide. Shard the lifted result with
-    `shard_ensemble` instead.
-    """
-    n_channels = len(next(iter(arrays.values())))
-    return StackedEnsemble(n_channels, {k: jnp.asarray(v) for k, v in arrays.items()}, 1)
 
 
 def shard_ensemble(ensemble, axis):
@@ -152,11 +139,13 @@ def member_mixing_operator_deriv(
 
 
 def sed_matrix_from_ensemble(a_ensemble, n_pix, components=COMPONENTS):
-    """The mixing matrix of an ensemble of per-channel operators, as a replicated array.
+    """The mixing matrix of an ensemble of per-channel operators, as one array.
 
     Returns the SEDs as an array of shape `(n_channels, n_components, n_pix)`, the layout of
-    `get_array_from_A`, so that the preconditioner computations apply unchanged: the mesh
-    axes are `Auto`, the compiler inserts the gathers where needed.
+    `get_array_from_A`, so that the preconditioner computations apply unchanged. The channel
+    axis stays laid out over the mesh; the `Auto` axes let the compiler insert the gathers
+    the einsum and the SVD need. The SED diagonals keep the member axis leading, whichever
+    the `axes` of the composite they come from: `lift` stacks its outputs that way.
     """
     blocks = a_ensemble.stacked.blocks
     return jnp.stack(
