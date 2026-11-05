@@ -367,18 +367,19 @@ def perform_compsep(
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
 
     # The channels are the members of furax ensembles, laid out over the devices whenever
-    # several are available: a stacked map of the channels has its data of shape
-    # (n_freq, n_stokes, n_pix), the channel axis first. A user-provided operator in the
-    # legacy frequency layout (n_stokes, n_freq, n_pix) couples the channels: it is wrapped
+    # several are available: the members of an ensemble are the slices of the leading axis
+    # of its leaves, so a stacked map of the channels is channel-first, of shape
+    # (n_freq, n_stokes, n_pix). A user-provided operator acts on the Stokes-first maps of
+    # the public API, (n_stokes, n_freq, n_pix), and couples the channels: it is wrapped
     # between relayout adapters and the computation stays on a single device.
     frequencies = np.asarray(frequencies, dtype=np.float64)
     n_freq = frequencies.size
-    has_legacy_operators = (
+    has_coupling_operators = (
         central_freq_op is not None
         or obs_mat_operator is not None
         or obsmat_operator_rhs is not None
     )
-    mesh_axis = None if has_legacy_operators else auto_mesh_axis(n_freq)
+    mesh_axis = None if has_coupling_operators else auto_mesh_axis(n_freq)
 
     nu_ensemble = channel_ensemble({'nu': frequencies[:, None]})
     invN_blocks = BlockDiagonalOperator(
@@ -393,7 +394,7 @@ def perform_compsep(
 
     # Precompute part of the right-hand side of the CG equation
     print("Precomputing the right-hand side of the CG equation . . .", flush=True)
-    if has_legacy_operators:
+    if has_coupling_operators:
         invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
         if obs_mat_operator is None:
             obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
@@ -405,19 +406,19 @@ def perform_compsep(
         relayout = RelayoutOperator(
             in_structure=jax.eval_shape(lambda x: stack_channel_maps(x, None), sky_map)
         )
-        # O.T N^-1 O conjugated into the stacked channel layout
+        # O.T N^-1 O conjugated into the channel-first layout
         central_apply = relayout.T @ central_freq_op @ relayout
 
-        def stacked_rhs(legacy_map):
-            """O.T N^-1 d in the stacked channel layout, from a legacy frequency map."""
-            return relayout.T(obsmat_operator_rhs(invN(legacy_map)))
+        def stacked_rhs(stokes_first_map):
+            """O.T N^-1 d in the channel-first layout, from a Stokes-first map."""
+            return relayout.T(obsmat_operator_rhs(invN(stokes_first_map)))
 
     else:
         # O is the identity: the central operator is block-diagonal over the channels
         central_apply = invN_blocks
 
-        def stacked_rhs(legacy_map):
-            return invN_blocks(stack_channel_maps(legacy_map, mesh_axis))
+        def stacked_rhs(stokes_first_map):
+            return invN_blocks(stack_channel_maps(stokes_first_map, mesh_axis))
 
     ONd = stacked_rhs(sky_map)
     jax.block_until_ready(ONd)
