@@ -10,14 +10,15 @@ evaluates its own channels and the sums become cross-device reductions. On a sin
 the same expressions run vectorized, as the sequential code did.
 
 Two layouts of a multi-channel map meet here. The public API of `perform_compsep` is
-Stokes-first, data `(n_stokes, n_channels, n_pix)`, and keeps it. The members of an
-ensemble are the slices of the leading axis of its leaves, so a stacked map of the channels
-is channel-first, `(n_channels, n_stokes, n_pix)`, one member per entry. (This is a
-convention of the furax ensemble engine, not a constraint of JAX: a `PartitionSpec` shards
-any axis, and the channel axis of a Stokes-first map could be sharded in place.) A
-user-provided operator acting on Stokes-first maps — an observation matrix, a central
-operator — is therefore wrapped between `RelayoutOperator` adapters; it also forces the
-single-device path, since it couples the channels.
+Stokes-first, data `(n_stokes, n_channels, n_pix)`, and keeps it. The block composites hand
+each block its slice of their input through `Ensemble.zip`, which takes the member axis
+leading, so the maps they consume and return are channel-first,
+`(n_channels, n_stokes, n_pix)`, one member per entry. (`StackedEnsemble` itself accepts
+`axes`, the member axis of each leaf, so an ensemble built here could read a Stokes-first
+map in place; only the composites still require the leading axis.) A user-provided operator
+acting on Stokes-first maps — an observation matrix, a central operator — is therefore
+wrapped between `RelayoutOperator` adapters; it also forces the single-device path, since
+it couples the channels. The permutation preserves the sharding, so it is device-local.
 """
 
 import jax
