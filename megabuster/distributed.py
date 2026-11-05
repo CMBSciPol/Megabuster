@@ -26,11 +26,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from furax.core import (
-    BlockRowOperator,
-    DiagonalOperator,
-    StackedEnsemble,
-)
+from furax import BlockRowOperator, DiagonalOperator
+from furax.core import StackedEnsemble
 
 from megabuster.mixingmatrix import (
     create_MixingMatrixOperator,
