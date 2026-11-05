@@ -15,7 +15,6 @@ from furax import (
     BlockDiagonalOperator,
     DiagonalOperator,
     IdentityOperator,
-    MoveAxisOperator,
 )
 from furax.core import lift
 from furax.obs.stokes import Stokes
@@ -30,7 +29,6 @@ from megabuster.distributed import (
     minimize_scipy_on_calling_thread,
     sed_matrix_from_ensemble,
     shard_ensemble,
-    stack_channel_maps,
 )
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps,
@@ -367,12 +365,10 @@ def perform_compsep(
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
 
     # The channels are the members of furax ensembles, laid out over the devices whenever
-    # several are available: the block composites slice their input per member through
-    # `Ensemble.zip`, which takes the member axis leading, so the maps they consume are
-    # channel-first, of shape (n_freq, n_stokes, n_pix). A user-provided operator acts on
-    # the Stokes-first maps of the public API, (n_stokes, n_freq, n_pix), and couples the
-    # channels: it is wrapped between relayout adapters and the computation stays on a
-    # single device.
+    # several are available. The block composites place the member axis of their stacked
+    # sides with `axes=1`, so every multi-channel map keeps the layout of the public API,
+    # (n_stokes, n_freq, n_pix), and nothing is transposed: a user-provided operator
+    # applies to it directly.
     frequencies = np.asarray(frequencies, dtype=np.float64)
     n_freq = frequencies.size
     has_coupling_operators = (
@@ -380,7 +376,7 @@ def perform_compsep(
         or obs_mat_operator is not None
         or obsmat_operator_rhs is not None
     )
-    mesh_axis = None if has_coupling_operators else auto_mesh_axis(n_freq)
+    mesh_axis = auto_mesh_axis(n_freq)
 
     nu_ensemble = channel_ensemble({'nu': frequencies[:, None]})
     invN_blocks = BlockDiagonalOperator(
@@ -390,7 +386,8 @@ def perform_compsep(
                 channel_ensemble({'invN': invN_matrix_nested}),
             ),
             mesh_axis,
-        )
+        ),
+        axes=1,
     )
 
     # Precompute part of the right-hand side of the CG equation
@@ -404,24 +401,18 @@ def perform_compsep(
         if central_freq_op is None:
             central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
 
-        # the channel axis back to where the public API has it: the composites consume
-        # channel-first maps, the user-provided operator acts on Stokes-first ones
-        relayout = MoveAxisOperator(
-            0, 1, in_structure=jax.eval_shape(lambda x: stack_channel_maps(x, None), sky_map)
-        )
-        # O.T N^-1 O conjugated into the channel-first layout
-        central_apply = relayout.T @ central_freq_op @ relayout
+        central_apply = central_freq_op
 
         def stacked_rhs(stokes_first_map):
-            """O.T N^-1 d in the channel-first layout, from a Stokes-first map."""
-            return relayout.T(obsmat_operator_rhs(invN(stokes_first_map)))
+            """O.T N^-1 d, in the layout of the public API."""
+            return obsmat_operator_rhs(invN(stokes_first_map))
 
     else:
         # O is the identity: the central operator is block-diagonal over the channels
         central_apply = invN_blocks
 
         def stacked_rhs(stokes_first_map):
-            return invN_blocks(stack_channel_maps(stokes_first_map, mesh_axis))
+            return invN_blocks(stokes_first_map)
 
     ONd = stacked_rhs(sky_map)
     jax.block_until_ready(ONd)
@@ -464,7 +455,8 @@ def perform_compsep(
                     nu_ensemble,
                 ),
                 mesh_axis,
-            )
+            ),
+            axes=1,
         )
 
     # @equinox.filter_jit
@@ -593,8 +585,7 @@ def perform_compsep(
             mesh_axis,
         )
 
-        # leaf-wise subtraction: the stacked containers do not have the Stokes leading axis
-        left_hand_term = jax.tree.map(operator.sub, ONd, central_apply(A(map_s)))
+        left_hand_term = ONd - central_apply(A(map_s))
 
         keys_params = params.keys()
 
@@ -607,7 +598,7 @@ def perform_compsep(
                 # <A'_key s, lhs> = <s, A'_key.T lhs>: the row form sums over the channels
                 # (and the devices), so the gradient comes back replicated
                 A_deriv_key = BlockColumnOperator(
-                    lift(lambda member, key=key: member[key], A_deriv_members)
+                    lift(lambda member, key=key: member[key], A_deriv_members), axes=1
                 )
                 final_grad_log += -2*dot_2(map_s, A_deriv_key.T(left_hand_term)) * beta_tau[key]
         return logL, final_grad_log
