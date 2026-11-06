@@ -27,6 +27,7 @@ from megabuster.distributed import (
     member_mixing_operator_deriv,
     minimize_scipy_on_calling_thread,
     sed_matrix_from_ensemble,
+    shard_ensemble,
 )
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps,
@@ -397,10 +398,15 @@ def perform_compsep(
     else:
         # O is the identity: the central operator is block-diagonal over the channels
         central_apply = stacked_rhs = BlockDiagonalOperator(
-            lift(
-                lambda member: DiagonalOperator(member['invN'], in_structure=in_structure_sed),
-                StackedEnsemble(n_freq, {'invN': invN_matrix_nested}),
-            ).shard(mesh_axis),
+            shard_ensemble(
+                lift(
+                    lambda member: DiagonalOperator(
+                        member['invN'], in_structure=in_structure_sed
+                    ),
+                    StackedEnsemble(n_freq, {'invN': invN_matrix_nested}),
+                ),
+                mesh_axis,
+            ),
             axes=1,
         )
 
@@ -432,17 +438,20 @@ def perform_compsep(
     def make_A(parameters_dict):
         """The mixing matrix as a column of per-channel blocks: components -> stacked channels."""
         return BlockColumnOperator(
-            lift(
-                lambda member: member_mixing_operator(
-                    member['nu'],
-                    parameters_dict,
-                    in_structure_sed,
-                    dust_nu0,
-                    synchrotron_nu0,
-                    patch_indices,
+            shard_ensemble(
+                lift(
+                    lambda member: member_mixing_operator(
+                        member['nu'],
+                        parameters_dict,
+                        in_structure_sed,
+                        dust_nu0,
+                        synchrotron_nu0,
+                        patch_indices,
+                    ),
+                    nu_ensemble,
                 ),
-                nu_ensemble,
-            ).shard(mesh_axis),
+                mesh_axis,
+            ),
             axes=1,
         )
 
@@ -557,17 +566,20 @@ def perform_compsep(
 
         logL = -dot_2(AOND, map_s)
 
-        A_deriv_members = lift(
-            lambda member: member_mixing_operator_deriv(
-                member['nu'],
-                parameters_dict,
-                in_structure_sed,
-                dust_nu0,
-                synchrotron_nu0,
-                patch_indices,
+        A_deriv_members = shard_ensemble(
+            lift(
+                lambda member: member_mixing_operator_deriv(
+                    member['nu'],
+                    parameters_dict,
+                    in_structure_sed,
+                    dust_nu0,
+                    synchrotron_nu0,
+                    patch_indices,
+                ),
+                nu_ensemble,
             ),
-            nu_ensemble,
-        ).shard(mesh_axis)
+            mesh_axis,
+        )
 
         left_hand_term = ONd - central_apply(A(map_s))
 
