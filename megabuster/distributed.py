@@ -29,6 +29,7 @@ from megabuster.mixingmatrix import (
 
 __all__ = [
     'auto_mesh_axis',
+    'shard_ensemble',
     'member_mixing_operator',
     'member_mixing_operator_deriv',
     'sed_matrix_from_ensemble',
@@ -74,6 +75,13 @@ def auto_mesh_axis(n_channels):
     )
     jax.set_mesh(jax.make_mesh((n_devices,), ('freq',), devices=devices, axis_types=(auto,)))
     return 'freq'
+
+
+def shard_ensemble(ensemble, axis):
+    """The ensemble laid out over the mesh axis, unchanged when no axis is given."""
+    if axis is None:
+        return ensemble
+    return ensemble.shard(axis)
 
 
 def _member_diagonals(operator_blocks):
