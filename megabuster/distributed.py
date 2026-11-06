@@ -182,9 +182,7 @@ def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None):
         'index': jnp.arange(n_channels),
     }
     axes = {'d': 1, 'invN': 0, 'nu': 0, 'w': 0, 'index': 0}
-    ensemble = StackedEnsemble(n_channels, stacked, axes=axes)
-    if axis is not None:
-        ensemble = ensemble.shard(axis)
+    ensemble = StackedEnsemble(n_channels, stacked, axes=axes).shard(axis)
     return dataclasses.replace(
         ensemble, policy=Policy(axis=ensemble.policy.axis, batch=ensemble.size_per_device)
     )
