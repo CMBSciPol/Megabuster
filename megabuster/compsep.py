@@ -652,9 +652,9 @@ def perform_compsep(
         distribute = None
 
     if distribute is not None:
+        from megabuster.BandpassOperator import channel_bandpasses
         from megabuster.distributed import (
             build_channel_ensemble,
-            channel_bandpasses,
             distributed_A_s_AOND,
             distributed_gradients,
             minimize_scipy_on_calling_thread,

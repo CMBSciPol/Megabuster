@@ -2,10 +2,12 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float
 
 from furax.obs.operators._seds import CMBOperator, DustOperator, SynchrotronOperator, mixing_matrix
+from furax.obs.stokes import StokesQU
 
 __all__ = [
     'create_MixingMatrixOperator',
     'create_MixingMatrixOperator_deriv',
+    'effective_seds',
     'CMBDerivOperator',
     'DustDerivOperator',
     'SynchrotronDerivOperator',
@@ -134,6 +136,41 @@ def create_MixingMatrixOperator_deriv(
     # Mixing matrix operator
     return {'beta_dust':mixing_matrix(cmb=cmb_derivative, dust=dust_derivative, synchrotron=cmb_derivative),
             'beta_pl':mixing_matrix(cmb=cmb_derivative, dust=cmb_derivative, synchrotron=synchrotron_derivative)}
+
+
+def effective_seds(nu, w, spectral, dust_nu0, synchrotron_nu0, derivatives=False):
+    """The SED of each component integrated over a channel, and its derivatives.
+
+    The SEDs are those of the furax operators, integrated against the channel weights:
+    `sed_c = sed_c(nu) @ w`, matching `(Bp @ A).reduce()` (and the plain mixing matrix for
+    a single frequency of weight 1). The components are ordered cmb, dust, synchrotron.
+    """
+    structure = StokesQU.structure_for((1,))
+    cmb = CMBOperator(nu, in_structure=structure)
+    dust = DustOperator(
+        nu,
+        frequency0=dust_nu0,
+        temperature=spectral['temp_dust'],
+        beta=spectral['beta_dust'],
+        in_structure=structure,
+    )
+    synchrotron = SynchrotronOperator(
+        nu,
+        frequency0=synchrotron_nu0,
+        beta_pl=spectral['beta_pl'],
+        in_structure=structure,
+    )
+    sed = jnp.stack([op._diagonal[:, 0] @ w for op in (cmb, dust, synchrotron)])
+    if not derivatives:
+        return sed, None, None
+    # the dust and synchrotron SEDs are proportional to (nu / nu0)^beta:
+    # their derivatives with respect to beta are log(nu / nu0) * SED
+    zero = jnp.zeros(())
+    log_nu_dust = jnp.log(nu / dust_nu0)
+    log_nu_sync = jnp.log(nu / synchrotron_nu0)
+    dsed_dust = jnp.stack([zero, (log_nu_dust * dust._diagonal[:, 0]) @ w, zero])
+    dsed_sync = jnp.stack([zero, zero, (log_nu_sync * synchrotron._diagonal[:, 0]) @ w])
+    return sed, dsed_dust, dsed_sync
 
 
 

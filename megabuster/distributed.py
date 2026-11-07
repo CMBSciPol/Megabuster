@@ -35,19 +35,16 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from furax.core import Policy, StackedEnsemble, map_reduce
 from furax.obs.operators._qu_rotations import rotate_qu
-from furax.obs.operators._seds import CMBOperator, DustOperator, SynchrotronOperator
 from furax.obs.stokes import StokesQU
 
-from megabuster.BandpassOperator import _normalized_weights
+from megabuster.mixingmatrix import effective_seds
 
 __all__ = [
     'auto_mesh_axis',
     'build_channel_ensemble',
-    'channel_bandpasses',
     'distributed_A_s_AOND',
     'distributed_gradients',
     'minimize_scipy_on_calling_thread',
@@ -118,38 +115,6 @@ def minimize_scipy_on_calling_thread(fn, init_params, solver_name, max_iter):
     return result.params, result.state
 
 
-def channel_bandpasses(bandpasses, units='K_CMB'):
-    """Return the per-channel integration frequencies and normalized weights.
-
-    Each channel integrates over its own frequency samples, with the weights of
-    `BandpassOperator.create_from_samples` (PySM convention): the effective SED of a
-    component is `sed(nu) @ w`, identical to the rows of `(Bp @ A).reduce()` restricted
-    to the frequencies of the channel.
-
-    Args:
-        bandpasses: For each channel, its frequencies in increasing order [GHz], and its
-            weights, or `None` for a top-hat bandpass. All the channels must have the same
-            number of samples, so that they form an ensemble.
-
-    Returns:
-        The frequencies and the weights, two arrays of shape `(n_channels, n_samp)`.
-    """
-    nus, ws = [], []
-    for nu, weight in bandpasses:
-        nu = np.atleast_1d(np.asarray(nu, dtype=float))
-        if np.any(nu <= 0):
-            raise ValueError('the per-channel integration requires positive frequencies.')
-        weight = np.ones_like(nu) if weight is None else np.asarray(weight, dtype=float)
-        nus.append(nu)
-        ws.append(np.asarray(_normalized_weights(jnp.asarray(nu), jnp.asarray(weight), units)))
-    if len({nu.size for nu in nus}) != 1:
-        raise ValueError(
-            'the channels must have the same number of bandpass samples to form an ensemble, '
-            f'got {[nu.size for nu in nus]}.'
-        )
-    return np.stack(nus), np.stack(ws)
-
-
 def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None):
     """Build the ensemble of the frequency channels, laid out over a mesh axis.
 
@@ -190,41 +155,6 @@ def build_channel_ensemble(sky_map, invN_diagonal, nus, weights, *, axis=None):
     )
 
 
-def _effective_seds(nu, w, spectral, dust_nu0, synchrotron_nu0, derivatives=False):
-    """The SED of each component integrated over the channel, and its derivatives.
-
-    The SEDs are those of the furax operators, integrated against the channel weights:
-    `sed_c = sed_c(nu) @ w`, matching `(Bp @ A).reduce()` (and the plain mixing matrix for
-    a single frequency of weight 1).
-    """
-    structure = StokesQU.structure_for((1,))
-    cmb = CMBOperator(nu, in_structure=structure)
-    dust = DustOperator(
-        nu,
-        frequency0=dust_nu0,
-        temperature=spectral['temp_dust'],
-        beta=spectral['beta_dust'],
-        in_structure=structure,
-    )
-    synchrotron = SynchrotronOperator(
-        nu,
-        frequency0=synchrotron_nu0,
-        beta_pl=spectral['beta_pl'],
-        in_structure=structure,
-    )
-    sed = jnp.stack([op._diagonal[:, 0] @ w for op in (cmb, dust, synchrotron)])
-    if not derivatives:
-        return sed, None, None
-    # the dust and synchrotron SEDs are proportional to (nu / nu0)^beta:
-    # their derivatives with respect to beta are log(nu / nu0) * SED
-    zero = jnp.zeros(())
-    log_nu_dust = jnp.log(nu / dust_nu0)
-    log_nu_sync = jnp.log(nu / synchrotron_nu0)
-    dsed_dust = jnp.stack([zero, (log_nu_dust * dust._diagonal[:, 0]) @ w, zero])
-    dsed_sync = jnp.stack([zero, zero, (log_nu_sync * synchrotron._diagonal[:, 0]) @ w])
-    return sed, dsed_dust, dsed_sync
-
-
 def _dot(x: StokesQU, y: StokesQU):
     return jnp.vdot(x.q, y.q) + jnp.vdot(x.u, y.u)
 
@@ -245,7 +175,7 @@ def _primal_member(member, angles, spectral, *, dust_nu0, synchrotron_nu0):
     and the central term member is `C_f.T N_f^-1 C_f` weighted by the SEDs, as assembled in
     `build_preconditioner2`.
     """
-    sed, _, _ = _effective_seds(
+    sed, _, _ = effective_seds(
         member['nu'], member['w'], spectral, dust_nu0, synchrotron_nu0
     )
     angle = angles[member['index']]
@@ -288,7 +218,7 @@ def _grad_member(member, angles, spectral, s, *, dust_nu0, synchrotron_nu0, use_
     `-2 <dA_f/dbeta s, lht_f>` for the spectral indices and
     `-2 <2 R(-angle_f - pi/4) A_f s, c_lht_f>` for the angle of the channel.
     """
-    sed, dsed_dust, dsed_sync = _effective_seds(
+    sed, dsed_dust, dsed_sync = effective_seds(
         member['nu'], member['w'], spectral, dust_nu0, synchrotron_nu0, derivatives=True
     )
     angle = angles[member['index']]
