@@ -72,7 +72,7 @@ def member_mixing_operator_deriv(
         patch_indices = single_patch_indices
 
     zero = CMBDerivOperator(frequencies=nu, in_structure=structure)
-    dust = DustDerivOperator(
+    dust_derivative = DustDerivOperator(
         nu,
         frequency0=dust_nu0,
         temperature=parameters_dict['temp_dust'],
@@ -81,7 +81,7 @@ def member_mixing_operator_deriv(
         beta_patch_indices=patch_indices['beta_dust_patches'],
         in_structure=structure,
     )
-    synchrotron = SynchrotronDerivOperator(
+    synchrotron_derivative = SynchrotronDerivOperator(
         nu,
         frequency0=synchrotron_nu0,
         beta_pl=parameters_dict['beta_pl'],
@@ -90,10 +90,10 @@ def member_mixing_operator_deriv(
     )
     return {
         'beta_dust': _member_block_row(
-            {'cmb': zero, 'dust': dust, 'synchrotron': zero}, structure
+            {'cmb': zero, 'dust': dust_derivative, 'synchrotron': zero}, structure
         ),
         'beta_pl': _member_block_row(
-            {'cmb': zero, 'dust': zero, 'synchrotron': synchrotron}, structure
+            {'cmb': zero, 'dust': zero, 'synchrotron': synchrotron_derivative}, structure
         ),
     }
 
