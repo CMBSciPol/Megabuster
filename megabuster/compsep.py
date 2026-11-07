@@ -23,18 +23,20 @@ from furax_cs import minimize, SOLVER_NAMES
 
 from megabuster.distributed import (
     auto_mesh_axis,
+    minimize_scipy_on_calling_thread,
+    shard_ensemble,
+)
+from megabuster.mixingmatrix import (
     member_mixing_operator,
     member_mixing_operator_deriv,
-    minimize_scipy_on_calling_thread,
-    sed_matrix_from_ensemble,
-    shard_ensemble,
 )
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps,
     get_preconditioner,
     get_A_from_array,
     get_maps_from_Stokes,
-    get_dense_furax_operator_from_freq_array
+    get_dense_furax_operator_from_freq_array,
+    sed_matrix_from_ensemble,
 )
 
 __all__ = [

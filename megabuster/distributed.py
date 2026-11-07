@@ -18,25 +18,12 @@ directly.
 """
 
 import jax
-import jax.numpy as jnp
-
-from furax import BlockRowOperator, DiagonalOperator
-
-from megabuster.mixingmatrix import (
-    create_MixingMatrixOperator,
-    create_MixingMatrixOperator_deriv,
-)
 
 __all__ = [
     'auto_mesh_axis',
     'shard_ensemble',
-    'member_mixing_operator',
-    'member_mixing_operator_deriv',
-    'sed_matrix_from_ensemble',
     'minimize_scipy_on_calling_thread',
 ]
-
-COMPONENTS = ('cmb', 'dust', 'synchrotron')
 
 
 def auto_mesh_axis(n_channels):
@@ -82,79 +69,6 @@ def shard_ensemble(ensemble, axis):
     if axis is None:
         return ensemble
     return ensemble.shard(axis)
-
-
-def _member_diagonals(operator_blocks):
-    """The per-component SED diagonals of a one-frequency mixing operator, as a dict."""
-    # the SED operators hold a diagonal of shape (1, 1), or (1, n_pix) with patch indices
-    return {component: block._diagonal[0] for component, block in operator_blocks.items()}
-
-
-def member_mixing_operator(
-    nu, parameters_dict, structure, dust_nu0, synchrotron_nu0, patch_indices
-):
-    """The mixing matrix of one channel: component maps -> the channel's map.
-
-    The SEDs are those of `create_MixingMatrixOperator` evaluated at the channel's
-    frequency; the operator maps `{'cmb', 'dust', 'synchrotron'}` component maps of the
-    member structure to a single channel map, without a frequency axis.
-    """
-    multi_channel = create_MixingMatrixOperator(
-        nu,
-        parameters_dict,
-        structure,
-        dust_nu0=dust_nu0,
-        synchrotron_nu0=synchrotron_nu0,
-        patch_indices=patch_indices,
-    )
-    return BlockRowOperator(
-        {
-            component: DiagonalOperator(diagonal, in_structure=structure)
-            for component, diagonal in _member_diagonals(multi_channel.blocks).items()
-        }
-    )
-
-
-def member_mixing_operator_deriv(
-    nu, parameters_dict, structure, dust_nu0, synchrotron_nu0, patch_indices
-):
-    """The derivatives of the mixing matrix of one channel, keyed by spectral parameter."""
-    multi_channel = create_MixingMatrixOperator_deriv(
-        nu,
-        parameters_dict,
-        structure,
-        dust_nu0=dust_nu0,
-        synchrotron_nu0=synchrotron_nu0,
-        patch_indices=patch_indices,
-    )
-    return {
-        key: BlockRowOperator(
-            {
-                component: DiagonalOperator(diagonal, in_structure=structure)
-                for component, diagonal in _member_diagonals(operator.blocks).items()
-            }
-        )
-        for key, operator in multi_channel.items()
-    }
-
-
-def sed_matrix_from_ensemble(a_ensemble, n_pix, components=COMPONENTS):
-    """The mixing matrix of an ensemble of per-channel operators, as one array.
-
-    Returns the SEDs as an array of shape `(n_channels, n_components, n_pix)`, the layout of
-    `get_array_from_A`, so that the preconditioner computations apply unchanged. The channel
-    axis stays laid out over the mesh; the `Auto` axes let the compiler insert the gathers
-    the einsum and the SVD need. The SED diagonals keep the member axis leading, whichever
-    the `axes` of the composite they come from: `lift` stacks its outputs that way.
-    """
-    blocks = a_ensemble.stacked.blocks
-    return jnp.stack(
-        [
-            jnp.broadcast_to(blocks[component].diagonal, (a_ensemble.size, n_pix))
-            for component in components
-        ],
-        axis=1,
-    )
 
 
 def minimize_scipy_on_calling_thread(fn, init_params, solver_name, max_iter, tol=None):
