@@ -1,13 +1,12 @@
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from furax import BlockRowOperator, DiagonalOperator
+from furax import BlockRowOperator, DiagonalOperator, ZeroOperator
 from furax.obs.operators import CMBOperator, DustOperator, SynchrotronOperator
 
 __all__ = [
     'member_mixing_operator',
     'member_mixing_operator_deriv',
-    'CMBDerivOperator',
     'DustDerivOperator',
     'SynchrotronDerivOperator',
 ]
@@ -19,10 +18,13 @@ single_patch_indices = {
 }
 def _member_block_row(operators, structure):
     """The one-channel operator: the SED diagonals of `operators`, as a BlockRow."""
-    # the SED operators hold a diagonal of shape (1, 1), or (1, n_pix) with patch indices
+    # the SED operators hold a diagonal of shape (1, 1), or (1, n_pix) with patch indices;
+    # a ZeroOperator has none and goes through unchanged
     return BlockRowOperator(
         {
-            component: DiagonalOperator(operator._diagonal[0], in_structure=structure)
+            component: operator
+            if isinstance(operator, ZeroOperator)
+            else DiagonalOperator(operator._diagonal[0], in_structure=structure)
             for component, operator in operators.items()
         }
     )
@@ -66,12 +68,13 @@ def member_mixing_operator_deriv(
     """The derivatives of the mixing matrix of one channel, keyed by spectral parameter.
 
     The derivative of the CMB SED with respect to any foreground spectral index is zero, so
-    each derivative operator keeps a single non-zero block.
+    each derivative operator keeps a single non-zero block: the others are `ZeroOperator`s,
+    whose application XLA eliminates entirely.
     """
     if patch_indices is None:
         patch_indices = single_patch_indices
 
-    zero = CMBDerivOperator(frequencies=nu, in_structure=structure)
+    zero = ZeroOperator(in_structure=structure)
     dust_derivative = DustDerivOperator(
         nu,
         frequency0=dust_nu0,
@@ -97,16 +100,6 @@ def member_mixing_operator_deriv(
         ),
     }
 
-
-
-class CMBDerivOperator(CMBOperator):
-    """
-    Zero operator with the structure of the CMB SED operator, used as the derivative of the
-    CMB SED with respect to any foreground spectral parameter.
-    """
-
-    def sed(self) -> Float[Array, 'freq 1']:
-        return jnp.zeros_like(super().sed())
 
 
 class DustDerivOperator(DustOperator):
