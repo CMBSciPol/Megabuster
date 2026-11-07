@@ -1,11 +1,14 @@
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
+from furax import BlockRowOperator, DiagonalOperator
 from furax.obs.operators import CMBOperator, DustOperator, SynchrotronOperator, mixing_matrix
 
 __all__ = [
     'create_MixingMatrixOperator',
     'create_MixingMatrixOperator_deriv',
+    'member_mixing_operator',
+    'member_mixing_operator_deriv',
     'CMBDerivOperator',
     'DustDerivOperator',
     'SynchrotronDerivOperator',
@@ -123,6 +126,60 @@ def create_MixingMatrixOperator_deriv(
     # Mixing matrix operator
     return {'beta_dust':mixing_matrix(cmb=cmb_derivative, dust=dust_derivative, synchrotron=cmb_derivative),
             'beta_pl':mixing_matrix(cmb=cmb_derivative, dust=cmb_derivative, synchrotron=synchrotron_derivative)}
+
+
+def _member_diagonals(operator_blocks):
+    """The per-component SED diagonals of a one-frequency mixing operator, as a dict."""
+    # the SED operators hold a diagonal of shape (1, 1), or (1, n_pix) with patch indices
+    return {component: block._diagonal[0] for component, block in operator_blocks.items()}
+
+
+def member_mixing_operator(
+    nu, parameters_dict, structure, dust_nu0, synchrotron_nu0, patch_indices
+):
+    """The mixing matrix of one channel: component maps -> the channel's map.
+
+    The SEDs are those of `create_MixingMatrixOperator` evaluated at the channel's
+    frequency; the operator maps `{'cmb', 'dust', 'synchrotron'}` component maps of the
+    member structure to a single channel map, without a frequency axis.
+    """
+    multi_channel = create_MixingMatrixOperator(
+        nu,
+        parameters_dict,
+        structure,
+        dust_nu0=dust_nu0,
+        synchrotron_nu0=synchrotron_nu0,
+        patch_indices=patch_indices,
+    )
+    return BlockRowOperator(
+        {
+            component: DiagonalOperator(diagonal, in_structure=structure)
+            for component, diagonal in _member_diagonals(multi_channel.blocks).items()
+        }
+    )
+
+
+def member_mixing_operator_deriv(
+    nu, parameters_dict, structure, dust_nu0, synchrotron_nu0, patch_indices
+):
+    """The derivatives of the mixing matrix of one channel, keyed by spectral parameter."""
+    multi_channel = create_MixingMatrixOperator_deriv(
+        nu,
+        parameters_dict,
+        structure,
+        dust_nu0=dust_nu0,
+        synchrotron_nu0=synchrotron_nu0,
+        patch_indices=patch_indices,
+    )
+    return {
+        key: BlockRowOperator(
+            {
+                component: DiagonalOperator(diagonal, in_structure=structure)
+                for component, diagonal in _member_diagonals(operator.blocks).items()
+            }
+        )
+        for key, operator in multi_channel.items()
+    }
 
 
 
