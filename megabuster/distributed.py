@@ -218,7 +218,7 @@ def _grad_member(member, angles, spectral, s, *, dust_nu0, synchrotron_nu0, use_
     `-2 <dA_f/dbeta s, lht_f>` for the spectral indices and
     `-2 <2 R(-angle_f - pi/4) A_f s, c_lht_f>` for the angle of the channel.
     """
-    sed, dsed_dust, dsed_sync = effective_seds(
+    sed, dust_derivative, synchrotron_derivative = effective_seds(
         member['nu'], member['w'], spectral, dust_nu0, synchrotron_nu0, derivatives=True
     )
     angle = angles[member['index']]
@@ -231,8 +231,8 @@ def _grad_member(member, angles, spectral, s, *, dust_nu0, synchrotron_nu0, use_
     c_lht = StokesQU(nd.q - nca_s.q, nd.u - nca_s.u)  # N^-1 d - N^-1 C A s
     lht = rotate_qu(c_lht, angle)  # C.T (...)
     grads = {
-        'beta_dust': -2 * _dot(_combine(dsed_dust, s), lht),
-        'beta_pl': -2 * _dot(_combine(dsed_sync, s), lht),
+        'beta_dust': -2 * _dot(_combine(dust_derivative, s), lht),
+        'beta_pl': -2 * _dot(_combine(synchrotron_derivative, s), lht),
     }
     if use_calibration:
         dxax = rotate_qu(a_s, -angle - jnp.pi / 4)

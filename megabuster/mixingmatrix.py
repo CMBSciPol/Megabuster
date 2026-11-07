@@ -168,9 +168,9 @@ def effective_seds(nu, w, spectral, dust_nu0, synchrotron_nu0, derivatives=False
     zero = jnp.zeros(())
     log_nu_dust = jnp.log(nu / dust_nu0)
     log_nu_sync = jnp.log(nu / synchrotron_nu0)
-    dsed_dust = jnp.stack([zero, (log_nu_dust * dust._diagonal[:, 0]) @ w, zero])
-    dsed_sync = jnp.stack([zero, zero, (log_nu_sync * synchrotron._diagonal[:, 0]) @ w])
-    return sed, dsed_dust, dsed_sync
+    dust_derivative = jnp.stack([zero, (log_nu_dust * dust._diagonal[:, 0]) @ w, zero])
+    synchrotron_derivative = jnp.stack([zero, zero, (log_nu_sync * synchrotron._diagonal[:, 0]) @ w])
+    return sed, dust_derivative, synchrotron_derivative
 
 
 
