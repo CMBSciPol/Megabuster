@@ -2,11 +2,9 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float
 
 from furax import BlockRowOperator, DiagonalOperator
-from furax.obs.operators import CMBOperator, DustOperator, SynchrotronOperator, mixing_matrix
+from furax.obs.operators import CMBOperator, DustOperator, SynchrotronOperator
 
 __all__ = [
-    'create_MixingMatrixOperator',
-    'create_MixingMatrixOperator_deriv',
     'member_mixing_operator',
     'member_mixing_operator_deriv',
     'CMBDerivOperator',
@@ -19,119 +17,15 @@ single_patch_indices = {
     'beta_dust_patches': None,
     'beta_pl_patches': None,
 }
-def create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=150.0, synchrotron_nu0=20.0, patch_indices=None):
-    """
-    Create the mixing matrix operator using the provided parameters.
-
-    Parameters
-    ----------
-    frequencies: jnp.ndarray
-        Array of frequencies in GHz.
-    parameters_dict: dict
-        Dictionary of parameters. Must contain the following
-        keys: 'temp_dust', 'beta_dust', and 'beta_pl'.
-    in_structure_sed: equinox.Structure
-        Structure to be provided to the SED object.
-    dust_nu0: float (optional)
-        Dust reference frequency parameter in GHz. Default is 150.0 GHz.
-    synchrotron_nu0: float (optional)
-        Synchrotron reference frequency parameter in GHz. Default is 20.0 GHz.
-
-    Returns
-    -------
-    AbstractLinearOperator
-        Mixing matrix operator, mapping a dict of component StokesQU maps to a frequency StokesQU map.
-
-    """
-    if patch_indices is None:
-        patch_indices = single_patch_indices
-
-    cmb = CMBOperator(frequencies, in_structure=in_structure_sed)
-    dust = DustOperator(
-        frequencies,
-        frequency0=dust_nu0,
-        temperature=parameters_dict['temp_dust'],
-        beta=parameters_dict['beta_dust'],
-        temperature_patch_indices=patch_indices['temp_dust_patches'],
-        beta_patch_indices=patch_indices['beta_dust_patches'],
-        in_structure=in_structure_sed
-    )
-    synchrotron = SynchrotronOperator(
-        frequencies, 
-        frequency0=synchrotron_nu0, 
-        beta_pl=parameters_dict['beta_pl'], 
-        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
-        in_structure=in_structure_sed
-    )
-
-    # Mixing matrix operator
-    return mixing_matrix(cmb=cmb, dust=dust, synchrotron=synchrotron)
-
-def create_MixingMatrixOperator_deriv(
-        frequencies, 
-        parameters_dict, 
-        in_structure_sed, 
-        dust_nu0=150.0, 
-        synchrotron_nu0=20.0, 
-        patch_indices=None
-    ):
-    """
-    Create the derivatives of the mixing matrix operator with respect to the spectral indices.
-
-    Parameters
-    ----------
-    frequencies: jnp.ndarray
-        Array of frequencies in GHz.
-    parameters_dict: dict
-        Dictionary of parameters. Must contain the following
-        keys: 'temp_dust', 'beta_dust', and 'beta_pl'.
-    in_structure_sed: equinox.Structure
-        Structure to be provided to the SED object.
-    dust_nu0: float (optional)
-        Dust reference frequency parameter in GHz. Default is 150.0 GHz.
-    synchrotron_nu0: float (optional)
-        Synchrotron reference frequency parameter in GHz. Default is 20.0 GHz.
-
-    Returns
-    -------
-    dict
-        Mixing matrix derivative operators, keyed by 'beta_dust' and 'beta_pl'.
-
-    """
-
-    if patch_indices is None:
-        patch_indices = single_patch_indices
-
-    cmb_derivative = CMBDerivOperator(
-        frequencies=frequencies, 
-        in_structure=in_structure_sed,
-    )
-    dust_derivative = DustDerivOperator(
-        frequencies,
-        frequency0=dust_nu0,
-        temperature=parameters_dict['temp_dust'],
-        beta=parameters_dict['beta_dust'],
-        temperature_patch_indices=patch_indices['temp_dust_patches'],
-        beta_patch_indices=patch_indices['beta_dust_patches'],
-        in_structure=in_structure_sed,
-    )
-    synchrotron_derivative = SynchrotronDerivOperator(
-        frequencies, 
-        frequency0=synchrotron_nu0, 
-        beta_pl=parameters_dict['beta_pl'], 
-        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
-        in_structure=in_structure_sed
-    )
-
-    # Mixing matrix operator
-    return {'beta_dust':mixing_matrix(cmb=cmb_derivative, dust=dust_derivative, synchrotron=cmb_derivative),
-            'beta_pl':mixing_matrix(cmb=cmb_derivative, dust=cmb_derivative, synchrotron=synchrotron_derivative)}
-
-
-def _member_diagonals(operator_blocks):
-    """The per-component SED diagonals of a one-frequency mixing operator, as a dict."""
+def _member_block_row(operators, structure):
+    """The one-channel operator: the SED diagonals of `operators`, as a BlockRow."""
     # the SED operators hold a diagonal of shape (1, 1), or (1, n_pix) with patch indices
-    return {component: block._diagonal[0] for component, block in operator_blocks.items()}
+    return BlockRowOperator(
+        {
+            component: DiagonalOperator(operator._diagonal[0], in_structure=structure)
+            for component, operator in operators.items()
+        }
+    )
 
 
 def member_mixing_operator(
@@ -139,46 +33,68 @@ def member_mixing_operator(
 ):
     """The mixing matrix of one channel: component maps -> the channel's map.
 
-    The SEDs are those of `create_MixingMatrixOperator` evaluated at the channel's
-    frequency; the operator maps `{'cmb', 'dust', 'synchrotron'}` component maps of the
-    member structure to a single channel map, without a frequency axis.
+    The SEDs are those of the furax operators at the channel's frequency; the operator maps
+    `{'cmb', 'dust', 'synchrotron'}` component maps of the member structure to a single
+    channel map, without a frequency axis.
     """
-    multi_channel = create_MixingMatrixOperator(
+    if patch_indices is None:
+        patch_indices = single_patch_indices
+
+    cmb = CMBOperator(nu, in_structure=structure)
+    dust = DustOperator(
         nu,
-        parameters_dict,
-        structure,
-        dust_nu0=dust_nu0,
-        synchrotron_nu0=synchrotron_nu0,
-        patch_indices=patch_indices,
+        frequency0=dust_nu0,
+        temperature=parameters_dict['temp_dust'],
+        beta=parameters_dict['beta_dust'],
+        temperature_patch_indices=patch_indices['temp_dust_patches'],
+        beta_patch_indices=patch_indices['beta_dust_patches'],
+        in_structure=structure,
     )
-    return BlockRowOperator(
-        {
-            component: DiagonalOperator(diagonal, in_structure=structure)
-            for component, diagonal in _member_diagonals(multi_channel.blocks).items()
-        }
+    synchrotron = SynchrotronOperator(
+        nu,
+        frequency0=synchrotron_nu0,
+        beta_pl=parameters_dict['beta_pl'],
+        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
+        in_structure=structure,
     )
+    return _member_block_row({'cmb': cmb, 'dust': dust, 'synchrotron': synchrotron}, structure)
 
 
 def member_mixing_operator_deriv(
     nu, parameters_dict, structure, dust_nu0, synchrotron_nu0, patch_indices
 ):
-    """The derivatives of the mixing matrix of one channel, keyed by spectral parameter."""
-    multi_channel = create_MixingMatrixOperator_deriv(
+    """The derivatives of the mixing matrix of one channel, keyed by spectral parameter.
+
+    The derivative of the CMB SED with respect to any foreground spectral index is zero, so
+    each derivative operator keeps a single non-zero block.
+    """
+    if patch_indices is None:
+        patch_indices = single_patch_indices
+
+    zero = CMBDerivOperator(frequencies=nu, in_structure=structure)
+    dust = DustDerivOperator(
         nu,
-        parameters_dict,
-        structure,
-        dust_nu0=dust_nu0,
-        synchrotron_nu0=synchrotron_nu0,
-        patch_indices=patch_indices,
+        frequency0=dust_nu0,
+        temperature=parameters_dict['temp_dust'],
+        beta=parameters_dict['beta_dust'],
+        temperature_patch_indices=patch_indices['temp_dust_patches'],
+        beta_patch_indices=patch_indices['beta_dust_patches'],
+        in_structure=structure,
+    )
+    synchrotron = SynchrotronDerivOperator(
+        nu,
+        frequency0=synchrotron_nu0,
+        beta_pl=parameters_dict['beta_pl'],
+        beta_pl_patch_indices=patch_indices['beta_pl_patches'],
+        in_structure=structure,
     )
     return {
-        key: BlockRowOperator(
-            {
-                component: DiagonalOperator(diagonal, in_structure=structure)
-                for component, diagonal in _member_diagonals(operator.blocks).items()
-            }
-        )
-        for key, operator in multi_channel.items()
+        'beta_dust': _member_block_row(
+            {'cmb': zero, 'dust': dust, 'synchrotron': zero}, structure
+        ),
+        'beta_pl': _member_block_row(
+            {'cmb': zero, 'dust': zero, 'synchrotron': synchrotron}, structure
+        ),
     }
 
 
