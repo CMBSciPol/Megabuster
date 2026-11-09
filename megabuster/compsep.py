@@ -31,7 +31,6 @@ from megabuster.mixingmatrix import (
     member_mixing_operator_deriv,
 )
 from megabuster.tools import (
-    get_diagonal_operator_from_stokes_maps,
     get_preconditioner,
     get_A_from_array,
     get_maps_from_Stokes,
@@ -378,43 +377,33 @@ def perform_compsep(
 
     nu_ensemble = StackedEnsemble(n_freq, {'nu': frequencies[:, None]})
 
+    # The noise covariance is block-diagonal over the channels. With the default identity
+    # observation operator, the compositions below reduce to invN itself, so the central
+    # operator stays an ensemble and its conjugate gradient is distributed.
+    invN = BlockDiagonalOperator(
+        shard_ensemble(
+            lift(
+                lambda member: DiagonalOperator(member['invN'], in_structure=in_structure_sed),
+                StackedEnsemble(n_freq, {'invN': invN_matrix_nested}),
+            ),
+            mesh_axis,
+        ),
+        axes=1,
+    )
+
+    # Prepare the observation matrix operator
+    if obs_mat_operator is None:
+        obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
+
+    if obsmat_operator_rhs is None:
+        obsmat_operator_rhs = obs_mat_operator.T
+
+    if central_freq_op is None:
+        central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
+
     # Precompute part of the right-hand side of the CG equation
     print("Precomputing the right-hand side of the CG equation . . .", flush=True)
-    if (
-        central_freq_op is not None
-        or obs_mat_operator is not None
-        or obsmat_operator_rhs is not None
-    ):
-        invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
-        if obs_mat_operator is None:
-            obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
-        if obsmat_operator_rhs is None:
-            obsmat_operator_rhs = obs_mat_operator.T
-        if central_freq_op is None:
-            central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
-
-        central_apply = central_freq_op
-
-        def stacked_rhs(stokes_first_map):
-            """O.T N^-1 d, in the layout of the public API."""
-            return obsmat_operator_rhs(invN(stokes_first_map))
-
-    else:
-        # O is the identity: the central operator is block-diagonal over the channels
-        central_apply = stacked_rhs = BlockDiagonalOperator(
-            shard_ensemble(
-                lift(
-                    lambda member: DiagonalOperator(
-                        member['invN'], in_structure=in_structure_sed
-                    ),
-                    StackedEnsemble(n_freq, {'invN': invN_matrix_nested}),
-                ),
-                mesh_axis,
-            ),
-            axes=1,
-        )
-
-    ONd = stacked_rhs(sky_map)
+    ONd = obsmat_operator_rhs(invN(sky_map))
     jax.block_until_ready(ONd)
     print("Right-hand side of the CG equation precomputed!", flush=True)
 
@@ -516,7 +505,7 @@ def perform_compsep(
             pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
 
-        diagonal_central_term = (A.T @ central_apply @ A).reduce().I(
+        diagonal_central_term = (A.T @ central_freq_op @ A).reduce().I(
             solver=lx.CG(
                 rtol=dictionary_parameters_CG['tol_CG'], 
                 atol=dictionary_parameters_CG['tol_CG'], 
@@ -585,7 +574,7 @@ def perform_compsep(
             mesh_axis,
         )
 
-        left_hand_term = ONd - central_apply(A(map_s))
+        left_hand_term = ONd - (central_freq_op @ A)(map_s)
 
         keys_params = params.keys()
 
@@ -629,7 +618,7 @@ def perform_compsep(
         output_params = first_guess_params
         number_iterations = 0
 
-    A_maxL, final_maps = get_A_s_AOND(output_params, stacked_rhs(sky_map))[:2]
+    A_maxL, final_maps = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
 
     A_maxL_array = np.asarray(sed_matrix_from_ensemble(A_maxL.blocks, n_pix))
 
@@ -642,7 +631,7 @@ def perform_compsep(
 
     def W_maxL(input_map):
 
-        output_map_truncated = get_A_s_AOND(output_params, stacked_rhs(input_map[...,pixels_to_retain_nested]))[1]
+        output_map_truncated = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
 
         output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
@@ -655,7 +644,7 @@ def perform_compsep(
 
     def W_params(params, input_map):
 
-        output_map_truncated = get_A_s_AOND(params, stacked_rhs(input_map[...,pixels_to_retain_nested]))[1]
+        output_map_truncated = get_A_s_AOND(params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
 
         output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
 
