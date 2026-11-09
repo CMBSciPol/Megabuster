@@ -71,8 +71,21 @@ def shard_ensemble(ensemble, axis):
     return ensemble.shard(axis)
 
 
-def minimize_scipy_on_calling_thread(fn, init_params, solver_name, max_iter, tol=None):
-    """The scipy solver of `furax_cs.minimize`, without the host-callback indirection.
+def minimize_scipy_on_calling_thread(
+    fn,
+    init_params,
+    solver_name,
+    max_iter=1000,
+    rtol=1e-8,
+    atol=1e-8,
+    lower_bound=None,
+    upper_bound=None,
+    precondition=False,
+    solver_options={},
+    refresh_steps=10,
+    **fn_kwargs,
+):
+    """`furax_cs.minimize` for its scipy solvers, without the host-callback indirection.
 
     `furax_cs.minimize` wraps the scipy solvers in `jax.pure_callback` (for vmap support):
     the objective is then evaluated from the runtime's callback thread, which does not see
@@ -81,20 +94,69 @@ def minimize_scipy_on_calling_thread(fn, init_params, solver_name, max_iter, tol
     evaluations on the calling thread, where the mesh is visible, and jits the objective
     and its gradient, traced once instead of at every evaluation.
 
+    The signature and the returned state are those of `furax_cs.minimize`, so that either
+    can be called with the same arguments. The tolerances and the scipy options are
+    honoured, which the scipy path of `furax_cs.minimize` drops: `solver_options['options']`
+    holds the options of the scipy method, and `rtol` and `atol` set its tolerances
+    (`ftol`, `gtol` and `xtol` for TNC, `ftol` and `gtol` for L-BFGS-B, `final_tr_radius`
+    for COBYQA) unless these options give them explicitly. `refresh_steps` only concerns the
+    optimistix solvers.
+
     Returns:
-        The optimized parameters and the solver state (with `iter_num`), like
-        `furax_cs.minimize`.
+        The optimized parameters and the `furax_cs` `UnifiedState` of the solver.
     """
+    from furax_cs.optim import condition
+    from furax_cs.optim.minimize import UnifiedState
+    from furax_cs.optim.solvers import SELFCONDITIONED_SOLVERS
     from jaxopt import ScipyBoundedMinimize
 
+    if precondition and solver_name in SELFCONDITIONED_SOLVERS:
+        print(f"Solver '{solver_name}' is self-conditioned: preconditioning ignored.", flush=True)
+        precondition = False
+    if precondition:
+        fn, to_opt, from_opt = condition(
+            fn,
+            lower=lower_bound,
+            upper=upper_bound,
+            scale_function=precondition,
+            init_params=init_params,
+            **fn_kwargs,
+        )
+        init_params = to_opt(init_params)
+        lower_bound = to_opt(lower_bound) if lower_bound is not None else None
+        upper_bound = to_opt(upper_bound) if upper_bound is not None else None
+    else:
+        from_opt = lambda params: params
+
     method = solver_name.split('_', 1)[1]
+    options = {'disp': False, **((solver_options or {}).get('options') or {})}
+    if method == 'tnc':
+        options.setdefault('ftol', atol)
+        options.setdefault('gtol', rtol)
+        options.setdefault('xtol', atol)
+    elif method == 'l-bfgs-b':
+        options.setdefault('ftol', atol)
+        options.setdefault('gtol', rtol)
+    elif method == 'cobyqa':
+        options.setdefault('final_tr_radius', atol)
+
     solver = ScipyBoundedMinimize(
-        fun=lambda params: fn(params),
+        fun=lambda params, **kwargs: fn(params, **kwargs),
         method=method,
         jit=True,
         maxiter=max_iter,
-        tol=tol,
-        options={'disp': False},
+        options=options,
     )
-    result = solver.run(init_params, bounds=None)
-    return result.params, result.state
+    if lower_bound is None and upper_bound is None:
+        bounds = None
+    else:
+        bounds = (lower_bound, upper_bound)
+    result = solver.run(init_params, bounds=bounds, **fn_kwargs)
+    params = from_opt(result.params)
+    state = UnifiedState(
+        best_loss=result.state.fun_val,
+        best_y=params,
+        iter_num=result.state.iter_num,
+        solver_state=result.state,
+    )
+    return params, state

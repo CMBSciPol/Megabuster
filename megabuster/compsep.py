@@ -261,6 +261,8 @@ def perform_compsep(
     dictionary_parameters_minimization: dict (optional)
         Dictionary containing the parameters for the minimization. The keys must be 'max_iter' and 'tol'.
         The values must be integers and floats respectively.
+        The optional keys are 'solver_name' and 'options', the `solver_options` of `furax_cs.minimize`:
+        for the scipy solvers, its own 'options' entry holds the options of the scipy method.
         Default is {'max_iter': 1, 'tol': 1e-5}.
     dictionary_parameters_CG: dict (optional)
         Dictionary containing the parameters for the conjugate gradient solver. The keys must be 'max_steps_CG' and 'tol_CG'.
@@ -603,26 +605,20 @@ def perform_compsep(
 
     if do_minimization:
         print("Launching minimization!!", flush=True)
-        if solver_name.startswith('scipy'):
-            # The furax_cs scipy wrapper evaluates the objective from a host-callback thread,
-            # which does not see the mesh: run the same jaxopt solver on the calling thread.
-            output_params, output_state = minimize_scipy_on_calling_thread(
-                fn=spectral_likelihood_custom_gradient,
-                init_params=first_guess_params,
-                solver_name=solver_name,
-                max_iter=dictionary_parameters_minimization['max_iter'],
-                tol=dictionary_parameters_minimization['tol'],
-            )
-        else:
-            output_params, output_state = minimize(
-                init_params=first_guess_params,
-                fn=spectral_likelihood_custom_gradient,
-                max_iter=dictionary_parameters_minimization['max_iter'],
-                rtol=dictionary_parameters_minimization['tol'],
-                atol=dictionary_parameters_minimization['tol'],
-                solver_name=solver_name,
-                solver_options=dictionary_parameters_minimization.get('options') or {}
-            ) # first output is the final parameters, second output is the final state of the optimizer
+        # The furax_cs scipy wrapper evaluates the objective from a host-callback thread,
+        # which does not see the mesh: the scipy solvers run on the calling thread instead.
+        minimizer = (
+            minimize_scipy_on_calling_thread if solver_name.startswith('scipy') else minimize
+        )
+        output_params, output_state = minimizer(
+            init_params=first_guess_params,
+            fn=spectral_likelihood_custom_gradient,
+            max_iter=dictionary_parameters_minimization['max_iter'],
+            rtol=dictionary_parameters_minimization['tol'],
+            atol=dictionary_parameters_minimization['tol'],
+            solver_name=solver_name,
+            solver_options=dictionary_parameters_minimization.get('options') or {}
+        ) # first output is the final parameters, second output is the final state of the optimizer
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)
         print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
