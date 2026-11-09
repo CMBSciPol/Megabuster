@@ -10,19 +10,32 @@ from typing import Callable
 
 import operator
 
-from furax.core import IdentityOperator
+from furax import (
+    BlockColumnOperator,
+    BlockDiagonalOperator,
+    DiagonalOperator,
+    IdentityOperator,
+)
+from furax.core import StackedEnsemble, lift
 from furax.obs.stokes import Stokes
 
 from cadre import minimize, SOLVER_NAMES
 
-from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
+from megabuster.distributed import (
+    auto_mesh_axis,
+    minimize_scipy_on_calling_thread,
+    shard_ensemble,
+)
+from megabuster.mixingmatrix import (
+    member_mixing_operator,
+    member_mixing_operator_deriv,
+)
 from megabuster.tools import (
-    get_diagonal_operator_from_stokes_maps, 
-    get_preconditioner, 
-    get_A_from_array, 
-    get_array_from_A,
-    get_maps_from_Stokes, 
-    get_dense_furax_operator_from_freq_array
+    get_preconditioner,
+    get_A_from_array,
+    get_maps_from_Stokes,
+    get_dense_furax_operator_from_freq_array,
+    sed_matrix_from_ensemble,
 )
 
 __all__ = [
@@ -247,6 +260,8 @@ def perform_compsep(
     dictionary_parameters_minimization: dict (optional)
         Dictionary containing the parameters for the minimization. The keys must be 'max_iter' and 'tol'.
         The values must be integers and floats respectively.
+        The optional keys are 'solver_name' and 'options', the `options` of `cadre.minimize`
+        (for the scipy solvers, the options of the scipy method).
         Default is {'max_iter': 1, 'tol': 1e-5}.
     dictionary_parameters_CG: dict (optional)
         Dictionary containing the parameters for the conjugate gradient solver. The keys must be 'max_steps_CG' and 'tol_CG'.
@@ -344,25 +359,52 @@ def perform_compsep(
             u=hp.reorder(sky_map.u, r2n=True)[..., pixels_to_retain_nested]
         )
 
-    # Prepare the in_structure of the upcoming operators: component maps are (n_stokes, n_pix),
-    # frequency maps are (n_stokes, n_freq, n_pix)
+    number_components = 3 # CMB, dust, synchrotron
+    n_pix = pixels_to_retain_nested.size
+
+    # Prepare the in_structure of the upcoming operators: component maps and single-channel
+    # maps are (n_stokes, n_pix)
     in_structure_sed = sky_map.structure_for((sky_map.shape[1],))
-    invN = get_diagonal_operator_from_stokes_maps(invN_matrix_nested, sky_map.structure)
+
+    # The channels are the members of furax ensembles, laid out over the devices whenever
+    # several are available. The block composites place the member axis of their stacked
+    # sides with `axes=1`, so every multi-channel map keeps the layout of the public API,
+    # (n_stokes, n_freq, n_pix), and nothing is transposed: a user-provided operator
+    # applies to it directly.
+    frequencies = np.asarray(frequencies, dtype=np.float64)
+    n_freq = frequencies.size
+    mesh_axis = auto_mesh_axis(n_freq)
+
+    nu_ensemble = StackedEnsemble(n_freq, {'nu': frequencies[:, None]})
+
+    # The noise covariance is block-diagonal over the channels. With the default identity
+    # observation operator, the compositions below reduce to invN itself, so the central
+    # operator stays an ensemble and its conjugate gradient is distributed.
+    invN = BlockDiagonalOperator(
+        shard_ensemble(
+            lift(
+                lambda member: DiagonalOperator(member['invN'], in_structure=in_structure_sed),
+                StackedEnsemble(n_freq, {'invN': invN_matrix_nested}),
+            ),
+            mesh_axis,
+        ),
+        axes=1,
+    )
 
     # Prepare the observation matrix operator
     if obs_mat_operator is None:
         obs_mat_operator = IdentityOperator(in_structure=invN.in_structure)
-    
+
     if obsmat_operator_rhs is None:
         obsmat_operator_rhs = obs_mat_operator.T
-    
+
     if central_freq_op is None:
         central_freq_op = obs_mat_operator.T @ invN @ obs_mat_operator
 
     # Precompute part of the right-hand side of the CG equation
     print("Precomputing the right-hand side of the CG equation . . .", flush=True)
     ONd = obsmat_operator_rhs(invN(sky_map))
-    ONd.q.block_until_ready()
+    jax.block_until_ready(ONd)
     print("Right-hand side of the CG equation precomputed!", flush=True)
 
     if matrix_precond is None:
@@ -385,17 +427,36 @@ def perform_compsep(
             central_matrix_precond = matrix_precond
         
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
-        
-    number_components = 3 # CMB, dust, synchrotron
-    n_pix = pixels_to_retain_nested.size
+
+    def create_mixing_matrix_operator(parameters_dict):
+        """The mixing matrix as a column of per-channel blocks: components -> stacked channels."""
+        return BlockColumnOperator(
+            shard_ensemble(
+                lift(
+                    lambda member: member_mixing_operator(
+                        member['nu'],
+                        parameters_dict,
+                        in_structure_sed,
+                        dust_nu0,
+                        synchrotron_nu0,
+                        patch_indices,
+                    ),
+                    nu_ensemble,
+                ),
+                mesh_axis,
+            ),
+            axes=1,
+        )
 
     # @equinox.filter_jit
-    def get_A_s_AOND(params, right_member=ONd):
+    def get_A_s_AOND(params, right_member=None):
         """
-            Compute the log-proba given a set of parameters 
+            Compute the log-proba given a set of parameters
         """
+        if right_member is None:
+            right_member = ONd
 
-        # Select parameters which are to be estimated 
+        # Select parameters which are to be estimated
         parameters_dict = dict()
         for param_name in ['temp_dust', 'beta_dust', 'beta_pl']:
             if param_name in params:
@@ -404,7 +465,7 @@ def perform_compsep(
                 parameters_dict[param_name] = fixed_params[param_name]
 
         # Mixing matrix operator
-        A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
+        A = create_mixing_matrix_operator(parameters_dict)
 
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
@@ -412,7 +473,7 @@ def perform_compsep(
         preconditioner = None
         if use_preconditioner_diag:
             print("Using diagonal preconditioner")
-            matrix_A = get_array_from_A(A, n_pix)
+            matrix_A = sed_matrix_from_ensemble(A.blocks, n_pix)
 
             # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
             preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fcp,fsp,fkp->psck', matrix_A, central_matrix_precond, matrix_A)).T)
@@ -424,7 +485,7 @@ def perform_compsep(
             )
         if use_preconditioner_pinv:
             print("Using pseudo-inverse preconditioner")
-            matrix_A = get_array_from_A(A, n_pix)
+            matrix_A = sed_matrix_from_ensemble(A.blocks, n_pix)
 
             if patch_indices is None:
                 print("Assuming no patches for the preconditioner computation")
@@ -444,7 +505,7 @@ def perform_compsep(
             pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
             preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
 
-        diagonal_central_term = (A.T @ central_freq_op @ A).I(
+        diagonal_central_term = (A.T @ central_freq_op @ A).reduce().I(
             solver=lx.CG(
                 rtol=dictionary_parameters_CG['tol_CG'], 
                 atol=dictionary_parameters_CG['tol_CG'], 
@@ -498,13 +559,19 @@ def perform_compsep(
 
         logL = -dot_2(AOND, map_s)
 
-        A_deriv = create_MixingMatrixOperator_deriv(
-            frequencies, 
-            parameters_dict, 
-            in_structure_sed, 
-            dust_nu0=dust_nu0, 
-            synchrotron_nu0=synchrotron_nu0, 
-            patch_indices=patch_indices
+        A_deriv_members = shard_ensemble(
+            lift(
+                lambda member: member_mixing_operator_deriv(
+                    member['nu'],
+                    parameters_dict,
+                    in_structure_sed,
+                    dust_nu0,
+                    synchrotron_nu0,
+                    patch_indices,
+                ),
+                nu_ensemble,
+            ),
+            mesh_axis,
         )
 
         left_hand_term = ONd - (central_freq_op @ A)(map_s)
@@ -516,29 +583,31 @@ def perform_compsep(
             patch_key = f'{key}_patches'
             if patch_indices is not None and patch_indices.get(patch_key) is not None:
                 raise Exception("Multi-patch version not validated")
-            
-                # Per-patch parameter: weight each pixel by the tangent of its patch
-                tangent_per_pixel = beta_tau[key][patch_indices[patch_key]]
-                A_deriv_tangent = get_A_from_array(
-                    jnp.moveaxis(get_array_from_A(A_deriv[key], n_pix) * tangent_per_pixel, 1, 0),
-                    in_structure_sed
-                )
-                final_grad_log += -2*dot_2(A_deriv_tangent(map_s), left_hand_term)
             else:
-                final_grad_log += -2*dot_2(A_deriv[key](map_s), left_hand_term) * beta_tau[key]
+                # <A'_key s, lhs> = <s, A'_key.T lhs>: the row form sums over the channels
+                # (and the devices), so the gradient comes back replicated
+                A_deriv_key = BlockColumnOperator(
+                    lift(lambda member, key=key: member[key], A_deriv_members), axes=1
+                )
+                final_grad_log += -2*dot_2(map_s, A_deriv_key.T(left_hand_term)) * beta_tau[key]
         return logL, final_grad_log
 
     if do_minimization:
         print("Launching minimization!!", flush=True)
-        output_params, output_state = minimize(
-            init_params=first_guess_params, 
-            fn=spectral_likelihood_custom_gradient, 
-            max_iter=dictionary_parameters_minimization['max_iter'], 
+        # The cadre scipy wrapper evaluates the objective from a host-callback thread,
+        # which does not see the mesh: the scipy solvers run on the calling thread instead.
+        minimizer = (
+            minimize_scipy_on_calling_thread if solver_name.startswith('scipy') else minimize
+        )
+        output_params, output_state = minimizer(
+            init_params=first_guess_params,
+            fn=spectral_likelihood_custom_gradient,
+            max_iter=dictionary_parameters_minimization['max_iter'],
             rtol=dictionary_parameters_minimization['tol'],
             atol=dictionary_parameters_minimization['tol'],
             solver_name=solver_name,
             options=dictionary_parameters_minimization.get('options', None)
-        ) # first output is the final parameters, second output is the final state of the optimizer 
+        ) # first output is the final parameters, second output is the final state of the optimizer
         output_params[list(first_guess_params.keys())[0]].block_until_ready()
         print(output_params, flush=True)
         print("Minimization launched!! Preparing the retrieving of the maps . . .", flush=True)
@@ -551,7 +620,7 @@ def perform_compsep(
 
     A_maxL, final_maps = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(sky_map)))[:2]
 
-    A_maxL_array = np.asarray(get_array_from_A(A_maxL, n_pix))
+    A_maxL_array = np.asarray(sed_matrix_from_ensemble(A_maxL.blocks, n_pix))
 
 
     final_maps_nested = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
@@ -561,7 +630,7 @@ def perform_compsep(
 
 
     def W_maxL(input_map):
-            
+
         output_map_truncated = get_A_s_AOND(output_params, obsmat_operator_rhs(invN(input_map[...,pixels_to_retain_nested])))[1]
 
         output_map_nested = np.array([get_maps_from_Stokes(output_map_truncated[key]) for key in ordering_component])
