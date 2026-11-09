@@ -11,6 +11,7 @@ __all__ = [
     'get_diagonal_operator_from_stokes_maps',
     'get_A_from_array',
     'get_array_from_A',
+    'sed_matrix_from_ensemble',
     'get_preconditioner',
     'get_healpix_indices_patch_from_mask',
 ]
@@ -115,6 +116,24 @@ def get_array_from_A(A, n_pix, components=('cmb', 'dust', 'synchrotron')):
     """
     return jnp.stack(
         [jnp.broadcast_to(A.blocks[component].diagonal, (A.blocks[component].diagonal.shape[0], n_pix)) for component in components],
+        axis=1,
+    )
+
+def sed_matrix_from_ensemble(a_ensemble, n_pix, components=('cmb', 'dust', 'synchrotron')):
+    """The mixing matrix of an ensemble of per-channel operators, as one array.
+
+    Returns the SEDs as an array of shape `(n_channels, n_components, n_pix)`, the layout of
+    `get_array_from_A`, so that the preconditioner computations apply unchanged. The SED
+    diagonals keep the member axis leading, whichever the `axes` of the composite they come
+    from: `lift` stacks its outputs that way. On a laid-out ensemble the channel axis keeps
+    its sharding.
+    """
+    blocks = a_ensemble.stacked.blocks
+    return jnp.stack(
+        [
+            jnp.broadcast_to(blocks[component].diagonal, (a_ensemble.size, n_pix))
+            for component in components
+        ],
         axis=1,
     )
 
