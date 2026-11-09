@@ -81,35 +81,40 @@ def minimize_scipy_on_calling_thread(
     lower_bound=None,
     upper_bound=None,
     precondition=False,
-    solver_options={},
+    record_history=False,
+    options=None,
     refresh_steps=10,
+    progress=True,
     **fn_kwargs,
 ):
-    """`furax_cs.minimize` for its scipy solvers, without the host-callback indirection.
+    """`cadre.minimize` for its scipy solvers, without the host-callback indirection.
 
-    `furax_cs.minimize` wraps the scipy solvers in `jax.pure_callback` (for vmap support):
-    the objective is then evaluated from the runtime's callback thread, which does not see
-    the mesh set by `jax.set_mesh` — the mesh is thread-local, and it cannot be set during
-    the tracing of `value_and_grad`. Calling the same jaxopt solver directly keeps the
+    `cadre.minimize` wraps the scipy solvers in `jax.pure_callback` (for vmap support): the
+    objective is then evaluated from the runtime's callback thread, which does not see the
+    mesh set by `jax.set_mesh` — the mesh is thread-local, and it cannot be set during the
+    tracing of `value_and_grad`. Calling the same jaxopt solver directly keeps the
     evaluations on the calling thread, where the mesh is visible, and jits the objective
     and its gradient, traced once instead of at every evaluation.
 
-    The signature and the returned state are those of `furax_cs.minimize`, so that either
+    The signature and the returned state are those of `cadre.minimize`, so that either
     can be called with the same arguments. The tolerances and the scipy options are
-    honoured, which the scipy path of `furax_cs.minimize` drops: `solver_options['options']`
-    holds the options of the scipy method, and `rtol` and `atol` set its tolerances
-    (`ftol`, `gtol` and `xtol` for TNC, `ftol` and `gtol` for L-BFGS-B, `final_tr_radius`
-    for COBYQA) unless these options give them explicitly. `refresh_steps` only concerns the
-    optimistix solvers.
+    honoured, which the scipy path of `cadre.minimize` drops: `options` holds the options
+    of the scipy method, and `rtol` and `atol` set its tolerances (`ftol`, `gtol` and `xtol`
+    for TNC, `ftol` and `gtol` for L-BFGS-B, `final_tr_radius` for COBYQA) unless `options`
+    gives them explicitly. As in `cadre.minimize`, `record_history` is not supported for
+    the scipy solvers, and `refresh_steps` and `progress` only concern the optimistix ones.
 
     Returns:
-        The optimized parameters and the `furax_cs` `UnifiedState` of the solver.
+        The optimized parameters and the `UnifiedState` of the solver.
     """
-    from furax_cs.optim import condition
-    from furax_cs.optim.minimize import UnifiedState
-    from furax_cs.optim.solvers import SELFCONDITIONED_SOLVERS
+    from cadre import SELFCONDITIONED_SOLVERS, UnifiedState, condition
     from jaxopt import ScipyBoundedMinimize
 
+    if record_history:
+        raise ValueError(
+            'record_history is not supported for the scipy solvers; '
+            f'got solver_name={solver_name!r}.'
+        )
     if precondition and solver_name in SELFCONDITIONED_SOLVERS:
         print(f"Solver '{solver_name}' is self-conditioned: preconditioning ignored.", flush=True)
         precondition = False
@@ -129,7 +134,7 @@ def minimize_scipy_on_calling_thread(
         from_opt = lambda params: params
 
     method = solver_name.split('_', 1)[1]
-    options = {'disp': False, **((solver_options or {}).get('options') or {})}
+    options = {'disp': False, **(options or {})}
     if method == 'tnc':
         options.setdefault('ftol', atol)
         options.setdefault('gtol', rtol)
