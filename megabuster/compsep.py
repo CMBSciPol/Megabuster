@@ -428,7 +428,7 @@ def perform_compsep(
         
         central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
 
-    def make_A(parameters_dict):
+    def create_mixing_matrix_operator(parameters_dict):
         """The mixing matrix as a column of per-channel blocks: components -> stacked channels."""
         return BlockColumnOperator(
             shard_ensemble(
@@ -465,7 +465,7 @@ def perform_compsep(
                 parameters_dict[param_name] = fixed_params[param_name]
 
         # Mixing matrix operator
-        A = make_A(parameters_dict)
+        A = create_mixing_matrix_operator(parameters_dict)
 
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
