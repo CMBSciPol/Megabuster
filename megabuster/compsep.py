@@ -13,7 +13,7 @@ import operator
 from furax.core import IdentityOperator
 from furax.obs.stokes import Stokes
 
-from furax_cs import minimize, SOLVER_NAMES
+from cadre import minimize, SOLVER_NAMES
 
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
 from megabuster.tools import (
