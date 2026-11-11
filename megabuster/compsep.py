@@ -1,5 +1,4 @@
 import warnings
-import shutil
 import numpy as np
 import jax
 jax.config.update("jax_traceback_filtering", "off")
@@ -11,7 +10,6 @@ import healpy as hp
 import jax.scipy.stats as stats
 import blackjax
 import matplotlib.pyplot as plt
-import corner
 import arviz as az
 
 from getdist import MCSamples, plots
@@ -21,23 +19,28 @@ from typing import Callable
 import operator
 
 from furax.core import IdentityOperator
-from furax.tree import as_structure
+#from furax.tree import as_structure
 from furax.obs.stokes import Stokes
 from furax.obs.operators._qu_rotations import QURotationOperator
 from furax.obs.operators._beam_operator import BeamOperator
+from furax.core import StackedEnsemble, lift
+from cadre import minimize, SOLVER_NAMES
 
 from furax_cs import minimize, SOLVER_NAMES
 
 from megabuster.mixingmatrix import create_MixingMatrixOperator, create_MixingMatrixOperator_deriv
 from megabuster.calibrationmatrix import build_calibration_operator, StokesPyTree_to_list, list_to_stokes
 from megabuster.BandpassOperator import BandpassOperator
+from megabuster.HWPOperator import HWPOperator
 from megabuster.tools import (
     get_diagonal_operator_from_stokes_maps, 
-    get_preconditioner,
-    get_preconditioner2,
-    get_A_from_array, 
-    get_maps_from_Stokes, 
-    get_dense_furax_operator_from_freq_array
+    get_maps_from_Stokes,
+)
+from megabuster.Preconditionners import (
+    build_preconditioner_HWP_C,
+    build_preconditioner_HWP_NC,
+    build_preconditioner_NHWP_C,
+    build_preconditioner_NHWP_NC,
 )
 
 __all__ = [
@@ -236,6 +239,7 @@ def perform_compsep(
     n_samples = 10000,
     is_noise_map = False,
     use_bandpass = False,
+    use_hwp = False
     ):
     """
     Perform component separation using the given parameters and data.
@@ -380,10 +384,6 @@ def perform_compsep(
         assert binary_mask.ndim == 1, "Binary mask must be a 1D array."
         pixels_mask = np.where(binary_mask != 0)[0]
         if use_full_sky:
-            #npix_full = invN_matrix.shape[-1]
-            #unobserved_pixels = np.where(binary_mask == 0)[0]
-            #pixels_to_retain = np.arange(npix_full)
-            #n_pix = pixels_to_retain.size
             npix_full = invN_matrix.shape[-1]
             n_pix = npix_full
             pixels_to_retain = np.arange(npix_full)
@@ -391,15 +391,16 @@ def perform_compsep(
             pixels_to_retain_nested = np.arange(npix_full)
             unobserved_pixels = np.where(binary_mask == 0)[0] 
             binary_mask = np.ones(npix_full)
-            #unobserved_pixels = np.array([], dtype=int)
         else :
             pixels_to_retain = np.where(binary_mask != 0)[0]
             pixels_to_retain_t = np.where(binary_mask != 0)[0]
             n_pix = pixels_to_retain.size
-            #unobserved_pixels = None
-        #unobserved_pixels = np.where(binary_mask == 0)[0]
-        #pixels_to_retain = np.where(binary_mask != 0)[0]
-        pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
+        if config.is_car:
+            # CAR: pixel arrays are flat (ny*nx) with no RING/NEST distinction, so
+            # hp.reorder does not apply (and fails on a non-HEALPix pixel count).
+            pixels_to_retain_nested = np.where(binary_mask != 0)[0]
+        else:
+            pixels_to_retain_nested = np.where(hp.reorder(binary_mask, r2n=True) != 0)[0]
     else:
         npix_full = invN_matrix.shape[-1]
         n_pix = npix_full
@@ -409,6 +410,8 @@ def perform_compsep(
         binary_mask = np.ones(npix_full)
         unobserved_pixels = np.array([], dtype=int)
     
+    if patch_indices is not None and config.is_car:
+        raise NotImplementedError("CAR: patch_indices relies on HEALPix NEST reordering.")
     if patch_indices is not None:
         assert np.all(np.isin(list(patch_indices.keys()), ['temp_dust_patches', 'beta_dust_patches', 'beta_pl_patches'])), "Single patch indices must be a dictionary with keys 'temp_dust_patches', 'beta_dust_patches', and 'beta_pl_patches'."
         for key_patch in ['temp_dust_patches', 'beta_dust_patches', 'beta_pl_patches']:
@@ -522,28 +525,10 @@ def perform_compsep(
         ONd.q.block_until_ready()
         print("Right-hand side of the CG equation precomputed!", flush=True)
 
-    if matrix_precond is None:
-        central_matrix_precond = jnp.copy(invN_matrix_ring)
-    elif use_preconditioner_diag:
-            
-        if matrix_precond.shape[-1] == binary_mask.size:
-            print("Using diag obsmat matrices")
-            matrix_precond = matrix_precond[..., pixels_to_retain]
-        central_matrix_precond = jnp.einsum('fsp,fsp,fsp->fsp', matrix_precond, invN_matrix_ring, matrix_precond)
+        # LOAD BANDPASS (AND HWP) OPERATORS
 
-    elif use_preconditioner_pinv:
-        assert matrix_precond.shape[:3] == (frequencies.size, n_stokes, n_stokes), "If we use a preconditioner based on the pseudo-inverse, the central preconditioner matrix must have its three first dimensions as (n_frequencies, n_stokes, n_stokes) with n_stokes=2."
-
-        assert matrix_precond.shape[-1] == matrix_precond.shape[-2], "Central preconditioner matrix must have square submatrices."
-
-        if matrix_precond.shape[-2:] == (binary_mask.size, binary_mask.size):
-            central_matrix_precond = matrix_precond[..., pixels_to_retain_ring, pixels_to_retain]
-        else:
-            central_matrix_precond = matrix_precond
-        
-        central_operator_precond = get_dense_furax_operator_from_freq_array(matrix_precond)
-
-    # LOAD BANDPASS OPERATOR
+    if use_hwp and not use_bandpass:
+        raise ValueError("use_hwp=True requires use_bandpass=True: the HWP is applied on the integration frequencies of the passbands.")
 
     if use_bandpass:
         if any(map_set.frequency is None for map_set in config.map_sets):
@@ -553,181 +538,51 @@ def perform_compsep(
         Bp = BandpassOperator.create_from_samples(
             bandpasses,
             in_structure=jax.tree.map(
-            lambda leaf: jax.ShapeDtypeStruct(leaf.shape[:-1] + (frequencies_mixing.size,) + leaf.shape[-1:], leaf.dtype),
-            in_structure_sed,
+                lambda leaf: jax.ShapeDtypeStruct(leaf.shape[:-1] + (frequencies_mixing.size,) + leaf.shape[-1:], leaf.dtype),
+                in_structure_sed,
             ),
         )
+        # calculs TM de kwitchi : une seule fois, ici
+        H = HWPOperator.from_kwitchi(frequencies_mixing, in_structure=Bp.in_structure) if use_hwp else None
     else:
         frequencies_mixing = frequencies
         Bp = None
+        H = None
 
-    # LOAD BEAM OPERATOR
+    def reduce_mixing(A):
+        """Matrice de mélange vue par les canaux : Bp @ H @ A, Bp @ A, ou A."""
+        if use_hwp:
+            return (Bp @ H @ A).reduce()
+        if use_bandpass:
+            return (Bp @ A).reduce()
+        return A
 
-    #beams = config.beams
-    #beam_fl = jnp.array([
-    #    hp.gauss_beam(fwhm=np.radians(fwhm / 60), lmax=config.lmax)
-    #    for fwhm in beams
-    #])  # shape (6, lmax+1)
-
-    #print('Beams, lmax = ', beams, config.lmax)
-    #print("beam_fl = ", beam_fl)
-    #print('Checkpoint')
-
-    #B = BeamOperator(
-    #    lmax=config.lmax,
-    #    beam_fl=beam_fl,
-    #    in_structure=invN.in_structure,
-    #    unobserved_pixels=unobserved_pixels  # np.where(binary_mask == 0)[0]
-    #    )
-    
-    #Op_rhs = B.T
-    #print('invN(sky_map) = ', jnp.sum(invN(sky_map).q**2))
-    #Test Beam Operator
-
-    #B_sky = B(sky_map)
-    #B_inv_B_sky = B.I(B_sky)  # ou B.T si BeamOperator n'a pas de .I et que B est juste une convolution (auquel cas B.I doit exister si B est inversible, vérifie l'implémentation de BeamOperator)
-
-    #diff = jax.tree.map(lambda a, b: a - b, B(B_inv_B_sky), B(sky_map))
-    #residual_norm = jnp.sqrt(dot_2(diff, diff))
-    #jax.debug.print("résidu B.I(B(x)) - x = {:.6e}", residual_norm)
-
-    #print('sky_map = ', sky_map)
-    #print('invN = ', invN)
     ONd = invN(sky_map)
-    if config.pre_proc_pars.use_real_beams:
-        #ONd_Beam = Op_rhs(real_invN(real_sky_map))
-        ONd_Beam = real_invN(real_sky_map)
-        #ONd_Beam = invN(sky_map)
-        #ONd_Beam = Op_rhs(invN(sky_map))
-        reals = real_invN(real_sky_map)
-        falses = invN(sky_map)
-        #reals = np.array(get_maps_from_Stokes(real_invN(real_sky_map)))[pixels_to_retain_t]
-        print('reals', reals)
-        print('falses', falses)
-        print('ONd_Beam', ONd_Beam)
-    else:
-        ONd_Beam = invN(sky_map)
-    #Test Beam Operator
-
-    #B_sky = B(sky_map)
-    #B_inv_B_sky = B.I(B_sky)  # ou B.T si BeamOperator n'a pas de .I et que B est juste une convolution (auquel cas B.I doit exister si B est inversible, vérifie l'implémentation de BeamOperator)
-
-    #diff = jax.tree.map(lambda a, b: a - b, B(B_inv_B_sky), B(sky_map))
-    #residual_norm = jnp.sqrt(dot_2(diff, diff))
-    #jax.debug.print("résidu B.I(B(x)) - x = {:.6e}", residual_norm)
-
-    #print("ONd.q = ", ONd.q)
-    #jax.debug.print("NaN in ONd ?: {}", jnp.any(jnp.isnan(ONd.q)))
+    #if config.pre_proc_pars.use_real_beams:
+    #    ONd_Beam = real_invN(real_sky_map)
+    #    reals = real_invN(real_sky_map)
+    #    falses = invN(sky_map)
+    #else:
+    #    ONd_Beam = invN(sky_map)
 
     number_components = 3 # CMB, dust, synchrotron
+    
+    def mixing_arrays(A):
+        """matrix_A (= α) et matrix_A_b (= β), chacun de forme (n_freq, n_comp, n_pix).
 
-    def build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=None):
+        Sans HWP : matrix_A est ton matrix_A habituel et matrix_A_b vaut 0.
+        Avec HWP : chaque bloc vaut A_a + J @ A_b ; on lit la diagonale de A_a et celle de A_b.
         """
-        Build a diagonal preconditioner for Op = A.T @ C.T @ invN @ C @ A.
-        
-        Since invN_Q = invN_U (same variance for Q and U), C.T @ invN @ C 
-        simplifies back to invN (cross terms vanish).
-
-        Parameters
-        ----------
-        invN : DiagonalOperator
-            Inverse noise covariance operator, _diagonal[0] = Q, _diagonal[1] = U.
-            Each has shape (n_freq, n_pix).
-        matrix_A : jnp.ndarray
-            Mixing matrix diagonal, shape (n_freq, n_components, n_pix).
-        angles_jnp : jnp.ndarray
-            HWP angles, shape (n_freq,).
-        Op : dict
-            used to get in_structure.
-
-        Returns
-        -------
-        preconditioner : BlockColumnOperator
-            Diagonal preconditioner operator ready to pass to CG.
-        """
-
-        # 1. Extraire la diagonale de invN
-        invN_Q = invN._diagonal[0]
-        invN_U = invN._diagonal[1]
-
-        # 2. Calcul de C.T @ invN @ C
-        cos_2a = jnp.cos(2 * angles_jnp).reshape(-1, 1)
-        sin_2a = jnp.sin(2 * angles_jnp).reshape(-1, 1)
-
-        CtinvNC_QQ = cos_2a**2 * invN_Q + sin_2a**2 * invN_U
-        CtinvNC_UU = sin_2a**2 * invN_Q + cos_2a**2 * invN_U
-        CtinvNC_QU = cos_2a * sin_2a * (invN_U - invN_Q)
-
-        CtinvNC = jnp.stack([
-        jnp.stack([CtinvNC_QQ, CtinvNC_QU], axis=1),
-        jnp.stack([CtinvNC_QU, CtinvNC_UU], axis=1),
-        ], axis=1)
-
-        # 3. Contraction avec A
-        matrix = jnp.einsum('fcp, fsjp, fkp -> cksjp', matrix_A, CtinvNC, matrix_A)
-        # -> (n_comp, n_comp, n_stokes, n_stokes, n_pix)
-        # Reshape en (n_pix, n_comp*n_stokes, n_comp*n_stokes)
-        n_comp, _, n_stokes, _, n_pix = matrix.shape
-        matrix_2d = matrix.transpose(4, 0, 2, 1, 3).reshape(n_pix, n_comp*n_stokes, n_comp*n_stokes)
-
-        # 4. Regularisation : remplacer les pixels non-observés par l'identité avant inversion
-        eye = jnp.eye(n_comp * n_stokes)
-
-        if unobserved_pixels is not None:
-            matrix_2d = matrix_2d.at[unobserved_pixels].set(eye)
-
-        #jax.debug.print("NaN in matrix_2d after regularization: {}", jnp.any(jnp.isnan(matrix_2d)))
-        #jax.debug.print("Inf in matrix_2d after regularization: {}", jnp.any(jnp.isinf(matrix_2d)))
-        #jax.debug.print("NaN in matrix_A: {}", jnp.any(jnp.isnan(matrix_A)))
-        #jax.debug.print("NaN in invN_Q: {}", jnp.any(jnp.isnan(invN_Q)))
-        #jax.debug.print("NaN in invN_U: {}", jnp.any(jnp.isnan(invN_U)))
-        #jax.debug.print("NaN in CtinvNC: {}", jnp.any(jnp.isnan(CtinvNC)))
-
-        # 5. Inversion (plus de singularité)
-        inv_matrix_2d = jnp.linalg.inv(matrix_2d) # (n_pix, n_comp*n_stokes, n_comp*n_stokes)
-        #jax.debug.print("NaN in inv_matrix_2d: {}", jnp.any(jnp.isnan(inv_matrix_2d)))
-        # 6. Remettre à zéro les pixels non-observés
-        #inv_matrix_2d = inv_matrix_2d.at[unobserved_pixels].set(0.0)
-        if unobserved_pixels is not None:
-            inv_matrix_2d = inv_matrix_2d.at[unobserved_pixels].set(0.0)
-
-        # Reshape back
-        preconditioner_matrix = inv_matrix_2d.reshape(n_pix, n_comp, n_stokes, n_comp, n_stokes).transpose(1, 3, 2, 4, 0)
-        # (n_comp, n_comp, n_stokes, n_stokes, n_pix)
-
-        # 4. Construire l'opérateur Furax
-        return get_preconditioner2(
-            preconditioner_matrix,
-            in_structure=as_structure(Op.in_structure['cmb'])
-        )
- 
-    def build_preconditioner(invN, matrix_A, Op, unobserved_pixels=None):
-        invN_Q = invN._diagonal[0]
-        invN_U = invN._diagonal[1]
-
-        M_Q = jnp.einsum('fcp, fp, fkp -> ckp', matrix_A, invN_Q, matrix_A)
-        M_U = jnp.einsum('fcp, fp, fkp -> ckp', matrix_A, invN_U, matrix_A)
-
-        # Regulariser les pixels non-observés
-        if unobserved_pixels is not None:
-            eye = jnp.eye(M_Q.shape[0])  # (n_comp, n_comp)
-            M_Q = M_Q.at[:, :, unobserved_pixels].set(eye[..., None])
-            M_U = M_U.at[:, :, unobserved_pixels].set(eye[..., None])
-
-        inv_M_Q = jnp.linalg.inv(M_Q.transpose(2, 0, 1)).transpose(1, 2, 0)
-        inv_M_U = jnp.linalg.inv(M_U.transpose(2, 0, 1)).transpose(1, 2, 0)
-
-        # Remettre à zéro les pixels non-observés
-        if unobserved_pixels is not None:
-            inv_M_Q = inv_M_Q.at[:, :, unobserved_pixels].set(0.0)
-            inv_M_U = inv_M_U.at[:, :, unobserved_pixels].set(0.0)
-
-        preconditioner_matrix = jnp.stack([inv_M_Q, inv_M_U], axis=2)
-
-        return get_preconditioner(
-            preconditioner_matrix,
-            as_structure(Op.in_structure['cmb'])
-        )
+        matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
+        matrix_A_b = jnp.zeros((frequencies.size, number_components, n_pix))
+        for i, component in enumerate(A.block_leaves):
+            if use_hwp:
+                op_a, op_jb = component.operand_leaves           # A_a   et   J @ A_b
+                matrix_A = matrix_A.at[:, i, :].set(op_a._diagonal)
+                matrix_A_b = matrix_A_b.at[:, i, :].set(op_jb.operands[1]._diagonal)   # operands = [J, A_b]
+            else:
+                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
+        return matrix_A, matrix_A_b
     
     def get_A_s_AOND_Beam(params, right_member):
         """
@@ -752,28 +607,19 @@ def perform_compsep(
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])[:, None]
             C = build_calibration_operator(-angles_jnp, vect_shape)
-            #C = IdentityOperator(in_structure=in_structure_noise_cov)
             operator_rhs = C.T
             c_right_member = invN(sky_map)
             right_member = operator_rhs(c_right_member) # Op ?
             c_central_freq_op = invN @ C
             central_freq_op = C.T @ invN @ C
         elif not use_obsmat:
-            #C = IdentityOperator(in_structure=invN.in_structure)
-            #operator_rhs = C
             c_right_member = invN(sky_map)
-            #right_member = c_right_member # Op ?
             c_central_freq_op = invN
-            #central_freq_op = B.T @ real_invN @ B
-            #central_freq_op = B.T @ invN @ B
-            #central_freq_op = invN
             central_freq_op = real_invN
 
         # Mixing matrix operator
-        #A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
-        A = create_MixingMatrixOperator(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
-        if use_bandpass:
-              A = (Bp @ A).reduce()
+        A = reduce_mixing(create_MixingMatrixOperator(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices))
+
         # Full right-hand side of the CG equation
         AOND = A.T(right_member)
 
@@ -782,32 +628,19 @@ def perform_compsep(
         if use_calibration_matrix:
             Op = A.T @ central_freq_op @ A
             # Construction de matrix_A
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for i, component in enumerate(A.block_leaves):
-                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
-            
+            matrix_A, matrix_A_b = mixing_arrays(A)
+
             if use_full_sky:
-                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
+                diagonal_central_term = build_preconditioner_NHWP_NBP_C(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
             else:
-                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
+                diagonal_central_term = build_preconditioner_NHWP_NBP_C(invN, matrix_A, angles_jnp, Op)
             first_central_term = diagonal_central_term(AOND)
 
         elif not use_obsmat:
-            #Op = A.T @ central_freq_op @ A
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for i, component in enumerate(A.block_leaves):
-                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
-
-            #if use_full_sky:
-            #    diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
-            #else:
-            #    diagonal_central_term = build_preconditioner(invN, matrix_A, Op)
-
+            matrix_A, matrix_A_b = mixing_arrays(A)
             Op = A.T @ real_invN @ A
-            #Op = A.T @ invN @ A
 
-            preconditioner = build_preconditioner(real_invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
-            #preconditioner = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
+            preconditioner = build_preconditioner_NHWP_NBP_NC(real_invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
 
             diagonal_central_term = (A.T @ central_freq_op @ A).I(
                 solver=lx.GMRES(
@@ -845,127 +678,40 @@ def perform_compsep(
             else:
                 parameters_dict[param_name] = fixed_params[param_name]
 
+                # C côté données (canaux) ; Bp et H sont dans A, via reduce_mixing
+        c_right_member = invN(sky_map)
         if use_calibration_matrix:
             n_angles = len([k for k in parameters_dict.keys() if k.startswith('angle_')])
             angles_jnp = jnp.array([parameters_dict[f'angle_{i}'] for i in range(n_angles)])[:, None]
             C = build_calibration_operator(-angles_jnp, vect_shape)
-            #C = IdentityOperator(in_structure=in_structure_noise_cov)
-            operator_rhs = C.T
-            c_right_member = invN(sky_map)
-            right_member = operator_rhs(c_right_member) # Op ?
+            right_member = C.T(c_right_member)
             c_central_freq_op = invN @ C
             central_freq_op = C.T @ invN @ C
-        elif not use_obsmat:
-            #C = IdentityOperator(in_structure=invN.in_structure)
-            #operator_rhs = C
-            c_right_member = invN(sky_map)
-            right_member = c_right_member # Op ?
+        else:
+            angles_jnp = None
+            C = IdentityOperator(in_structure=invN.in_structure)
+            right_member = c_right_member
             c_central_freq_op = invN
             central_freq_op = invN
-            C = IdentityOperator(in_structure=invN.in_structure)
 
-        # Mixing matrix operator
-        #A = create_MixingMatrixOperator(frequencies, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
-        A = create_MixingMatrixOperator(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
-        if use_bandpass:
-            A = (Bp @ A).reduce()
-        # Full right-hand side of the CG equation
+        # A = Bp @ H @ A, Bp @ A ou A selon use_hwp / use_bandpass
+        A = reduce_mixing(create_MixingMatrixOperator(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices))
         AOND = A.T(right_member)
 
-        ## Calculate preconditioners :
-        preconditioner = None
+        Op = A.T @ central_freq_op @ A
+        matrix_A, matrix_A_b = mixing_arrays(A)
+        unobs = unobserved_pixels if use_full_sky else None
 
-        if use_obsmat:
-            c_right_member = None
-            c_central_freq_op = None
-            if use_preconditioner_diag:
-                print("Using diagonal preconditioner")
-                matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-                for component in range(number_components):
-                    matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-                
-                # Compute the preconditioner matrix assuming that the observation matrix is the identity and the noise covariance matrix is diagonal in pixel domain
-                preconditioner_matrix = jax.lax.stop_gradient(jnp.linalg.pinv(jnp.einsum('fcp,fsp,fkp->psck', matrix_A, central_matrix_precond, matrix_A)).T)
+        if use_hwp and use_calibration_matrix:
+            diagonal_central_term = build_preconditioner_HWP_C(invN, matrix_A, matrix_A_b, angles_jnp, Op, unobserved_pixels=unobs)
+        elif use_hwp:
+            diagonal_central_term = build_preconditioner_HWP_NC(invN, matrix_A, matrix_A_b, Op, unobserved_pixels=unobs)
+        elif use_calibration_matrix:
+            diagonal_central_term = build_preconditioner_NHWP_C(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobs)
+        else:
+            diagonal_central_term = build_preconditioner_NHWP_NC(invN, matrix_A, Op, unobserved_pixels=unobs)
 
-                # Prepare the preconditioner operator
-                preconditioner = get_preconditioner(
-                    preconditioner_matrix, 
-                    as_structure(AOND['cmb'])
-                )
-        if use_preconditioner_pinv:
-            print("Using pseudo-inverse preconditioner")
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for component in range(number_components):
-                matrix_A = matrix_A.at[:,component,:].set(A.block_leaves[component]._diagonal)
-            
-            if patch_indices is None:
-                print("Assuming no patches for the preconditioner computation")
-                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A[...,0].T, full_matrices=False)
-            else:
-                print("Assuming patches for the preconditioner computation")
-                matrix_u, matrix_s, matrix_vh = jnp.linalg.svd(matrix_A.T, full_matrices=False)
-
-            pseudo_inverse_At = jax.lax.stop_gradient(jnp.einsum(
-                    '...ba,...b,...cb->...ac', 
-                    matrix_vh, 
-                    jnp.where(matrix_s!=0, 1./matrix_s, 0.),
-                    matrix_u,
-                )
-            )
-
-            pseudo_inverse_A_op = get_A_from_array(pseudo_inverse_At.T, in_structure_sed)
-            preconditioner = pseudo_inverse_A_op.T @ central_operator_precond @ pseudo_inverse_A_op
-
-        diagonal_central_term = (A.T @ central_freq_op @ A).I(
-            solver=lx.CG(
-                rtol=dictionary_parameters_CG['tol_CG'], 
-                atol=dictionary_parameters_CG['tol_CG'], 
-                max_steps=dictionary_parameters_CG['max_steps_CG']
-            ), 
-            preconditioner=preconditioner,
-            callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
-        )
-
-        if use_calibration_matrix:
-            Op = A.T @ central_freq_op @ A
-            # Construction de matrix_A
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for i, component in enumerate(A.block_leaves):
-                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
-            
-            if use_full_sky:
-                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op, unobserved_pixels=unobserved_pixels)
-                #diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
-            else:
-                diagonal_central_term = build_preconditioner2(invN, matrix_A, angles_jnp, Op)
-            first_central_term = diagonal_central_term(AOND)
-            #jax.debug.print("NaN in first_central_term ?: {}", jnp.any(jnp.isnan(first_central_term['cmb'].q)))
-
-        elif not use_obsmat:
-            Op = A.T @ central_freq_op @ A
-            matrix_A = jnp.zeros((frequencies.size, number_components, n_pix))
-            for i, component in enumerate(A.block_leaves):
-                matrix_A = matrix_A.at[:, i, :].set(component._diagonal)
-
-            if use_full_sky:
-                diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
-            else:
-                diagonal_central_term = build_preconditioner(invN, matrix_A, Op)
-
-            #diagonal_central_term = build_preconditioner(invN, matrix_A, Op, unobserved_pixels=unobserved_pixels)
-            #preconditioner = IdentityOperator(in_structure=Op.in_structure)
-            #diagonal_central_term = (A.T @ central_freq_op @ A).I(
-            #    solver=lx.CG(
-            #        rtol=dictionary_parameters_CG['tol_CG'], 
-            #        atol=dictionary_parameters_CG['tol_CG'], 
-            #        max_steps=dictionary_parameters_CG['max_steps_CG']
-            #    ), 
-            #    preconditioner=preconditioner,
-            #    callback=lambda x: print("Number of iterations in CG:", x.stats['num_steps'], flush=True)
-            #)
-            first_central_term = diagonal_central_term(AOND)
-            #print('first_central_term 1 = ', first_central_term)
-            #jax.debug.print("'first_central_term 1 = {}", first_central_term)
+        first_central_term = diagonal_central_term(AOND)
 
         #jax.debug.print("'first_central_term 2 = {}", first_central_term)
 
@@ -1045,19 +791,9 @@ def perform_compsep(
         else:
             logL = -dot_2(AOND, map_s)
 
-        #A_deriv = create_MixingMatrixOperator_deriv(
-        #    frequencies, 
-        #    parameters_dict, 
-        #    in_structure_sed, 
-        #    dust_nu0=dust_nu0, 
-        #    synchrotron_nu0=synchrotron_nu0, 
-        #    patch_indices=patch_indices
-        #)
-
         A_deriv = create_MixingMatrixOperator_deriv(frequencies_mixing, parameters_dict, in_structure_sed, dust_nu0=dust_nu0, synchrotron_nu0=synchrotron_nu0, patch_indices=patch_indices)
-        if use_bandpass:
-            A_deriv = {key: (Bp @ op).reduce() for key, op in A_deriv.items()}
-
+        A_deriv = {key: reduce_mixing(op) for key, op in A_deriv.items()}
+        
         keys_params = params.keys()
         final_grad_log = 0
 
@@ -1233,7 +969,6 @@ def perform_compsep(
 
         samples_array = np.column_stack([v for v in position_degrees.values()])
         
-        #samples_array = np.column_stack([np.array(v) for v in states.position.values()])
         params_names = list(states.position.keys())
         
         means = np.mean(samples_array, axis=0)
@@ -1335,72 +1070,19 @@ def perform_compsep(
         #jax.debug.print("résidu absolu = {:.6e}", res_norm)
         #jax.debug.print("||AOND||      = {:.6e}", aond_norm)
         #jax.debug.print("résidu relatif = {:.6e}", res_norm / aond_norm)
-        #AON = A_maxL.T @ B.T @ real_invN
-        #W = diagonal_central_term @ AON
-        #W = None
     else :
         A_maxL, final_maps, AOND, c_central_freq_op, central_freq_op, _, _, diagonal_central_term, C = get_A_s_AOND(output_params, right_member=ONd)
         #AON = A_maxL.T @ C.T @ invN
-        #W = diagonal_central_term @ AON
-
-    #W = None
 
     n_pix_retain = pixels_to_retain.size
             
 
-    A_maxL_array = np.zeros((frequencies.size, number_components, n_pix_retain))
-    for component in range(number_components):
-        A_maxL_array[:,component] = A_maxL.block_leaves[component]._diagonal
-
+    A_maxL_array, A_maxL_array_b = (np.asarray(m) for m in mixing_arrays(A_maxL))
 
     final_maps_ring = np.array([get_maps_from_Stokes(final_maps[key]) for key in ordering_component])
 
     final_maps_full_sky = np.zeros((number_components, final_maps_ring.shape[-2], binary_mask.shape[-1]), dtype=final_maps_ring.dtype)
     final_maps_full_sky[..., pixels_to_retain] = final_maps_ring
-
-    #n_angles_W = len([k for k in output_params.keys() if k.startswith('angle_')])
-    #angles_jnp_W = jnp.array(
-    #    [output_params[f'angle_{i}'] for i in range(n_angles_W)]
-    #)[:, None]  # (n_freq, 1)
-
-    #invN_Q = invN_matrix_ring[:, 0, :]  # (n_freq, n_pix)
-    #invN_U = invN_matrix_ring[:, 1, :]  # (n_freq, n_pix)
-
-    #cos_2a = jnp.cos(2 * angles_jnp_W)
-    #sin_2a = jnp.sin(2 * angles_jnp_W)
-
-    #CtinvN_QQ = cos_2a * invN_Q
-    #CtinvN_QU = sin_2a * invN_U
-    #CtinvN_UQ = -sin_2a * invN_Q
-    #CtinvN_UU = cos_2a * invN_U
-
-    #CtinvN = jnp.stack([
-    #    jnp.stack([CtinvN_QQ, CtinvN_QU], axis=0),
-    #    jnp.stack([CtinvN_UQ, CtinvN_UU], axis=0),
-    #], axis=0)  # (s_out, s_in, n_freq, n_pix)
-
-    #matrix_A_W = jnp.asarray(A_maxL_array)  # (n_freq, n_comp, n_pix)
-
-    #M = jnp.einsum('fcp,sSfp,fCp->cCsSp', matrix_A_W, CtinvN, matrix_A_W)
-    #n_comp_W = matrix_A_W.shape[1]
-    #n_pix_W = matrix_A_W.shape[-1]
-    #M_2d = M.transpose(4, 0, 2, 1, 3).reshape(n_pix_W, n_comp_W * 2, n_comp_W * 2)
-
-    #eye_W = jnp.eye(n_comp_W * 2)
-    #if unobserved_pixels is not None and len(unobserved_pixels) > 0:
-    #    M_2d = M_2d.at[unobserved_pixels].set(eye_W)
-
-    #M_inv_2d = jnp.linalg.inv(M_2d)
-    #if unobserved_pixels is not None and len(unobserved_pixels) > 0:
-    #    M_inv_2d = M_inv_2d.at[unobserved_pixels].set(0.0)
-
-    #M_inv_W = M_inv_2d.reshape(n_pix_W, n_comp_W, 2, n_comp_W, 2).transpose(1, 3, 2, 4, 0)
-
-    #AON_W = jnp.einsum('fCp,SifP->CSfiP', matrix_A_W, CtinvN)
-
-    #W_array = np.array(
-    #    jnp.einsum('ccsSp,cSfip->csfip', M_inv_W, AON_W)
-    #)  # (n_comp, s_out, n_freq, s_in, n_pix_retain)
 
     W_array = None
 
@@ -1432,8 +1114,6 @@ def perform_compsep(
             output_map[i] = output_map[i]
         return output_map
     
-    
-
     return Results.from_compsep_results(
         list(output_params.keys()),
         output_params, 
@@ -1449,6 +1129,5 @@ def perform_compsep(
         params_names = params_names,
         mc_samples = mc_samples,
         mean_deg = mean_np,
-        #diagonal_central_term = W,
         W_array = W_array,
     )
