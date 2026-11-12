@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, ArrayLike, Float, PyTree
 
 from furax import AbstractLinearOperator, BlockRowOperator, BroadcastDiagonalOperator
@@ -11,7 +12,7 @@ from furax.core import TransposeOperator
 from furax.core.rules import AbstractCompositionRule
 from furax.obs.operators._seds import AbstractSEDOperator, _check_units, k_rj_to_k_cmb
 
-__all__ = ['BandpassOperator']
+__all__ = ['BandpassOperator', 'channel_bandpasses']
 
 
 class BandpassOperator(AbstractLinearOperator):
@@ -238,6 +239,38 @@ class BandpassBlockRowRule(AbstractCompositionRule):
     ) -> list[AbstractLinearOperator]:
         assert isinstance(right, BlockRowOperator)  # ty assert
         return [BlockRowOperator(right._tree_map(lambda block: left @ block)).reduce()]
+
+
+def channel_bandpasses(bandpasses, units='K_CMB'):
+    """Return the per-channel integration frequencies and normalized weights.
+
+    Each channel integrates over its own frequency samples, with the weights of
+    `BandpassOperator.create_from_samples` (PySM convention): the effective SED of a
+    component is `sed(nu) @ w`, identical to the rows of `(Bp @ A).reduce()` restricted
+    to the frequencies of the channel.
+
+    Args:
+        bandpasses: For each channel, its frequencies in increasing order [GHz], and its
+            weights, or `None` for a top-hat bandpass. All the channels must have the same
+            number of samples, so that they form an ensemble.
+
+    Returns:
+        The frequencies and the weights, two arrays of shape `(n_channels, n_samp)`.
+    """
+    nus, ws = [], []
+    for nu, weight in bandpasses:
+        nu = np.atleast_1d(np.asarray(nu, dtype=float))
+        if np.any(nu <= 0):
+            raise ValueError('the per-channel integration requires positive frequencies.')
+        weight = np.ones_like(nu) if weight is None else np.asarray(weight, dtype=float)
+        nus.append(nu)
+        ws.append(np.asarray(_normalized_weights(jnp.asarray(nu), jnp.asarray(weight), units)))
+    if len({nu.size for nu in nus}) != 1:
+        raise ValueError(
+            'the channels must have the same number of bandpass samples to form an ensemble, '
+            f'got {[nu.size for nu in nus]}.'
+        )
+    return np.stack(nus), np.stack(ws)
 
 
 def _channel_samples(
