@@ -31,12 +31,15 @@ dependencies = [
     'jax_grid_search',
     'numpy',
     'scipy',
-    'furax>=0.15.3',
+    # The ensemble engine needs CMBSciPol/furax#441 to #458, not released yet: pin the
+    # commit of the furax main branch the distribution was validated against.
+    'furax @ git+https://github.com/CMBSciPol/furax.git@3ce696d802e33cdb34ecb6dc6566b1e629915aec',
     'jax-cadre>=0.1.3',
     'jax',
     'equinox',
     'optax',
     'lineax',
+    'jaxopt',
     'jaxtyping',
     'opt_einsum',
     'tqdm',
